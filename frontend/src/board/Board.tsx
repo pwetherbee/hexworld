@@ -6,6 +6,7 @@ import { CameraDirector } from "./CameraDirector";
 import { CameraRig, rig } from "./cameraRig";
 import { hexToWorld, parseKey } from "./hexMath";
 import { HexGrid } from "./HexGrid";
+import { SeedBeacon } from "./SeedBeacon";
 import { SURFACE_TIME } from "./relief";
 import { TileMesh } from "./TileMesh";
 
@@ -23,6 +24,7 @@ export function Board() {
       <WorldFramer />
       {import.meta.env.DEV && <DevProbe />}
       <HexGrid />
+      <SeedBeacon />
       {world && (
         <>
           <Tiles />

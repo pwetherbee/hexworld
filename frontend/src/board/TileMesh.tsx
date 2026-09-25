@@ -3,41 +3,41 @@ import { memo, useEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
 import type { TileLayer } from "../api/types.gen";
 import { useStore } from "../store";
+import { type FormingUniforms, makeFormingMaterial, tilePalette } from "./forming";
 import { SHARED, hexOutlinePoints, tileFaceGeometry } from "./geometry";
-import { Spring, hexDistance, hexToWorld } from "./hexMath";
+import { DIRECTIONS, Spring, hexDistance, hexKey, hexToWorld } from "./hexMath";
 import { LEVEL_STEP, levelAt, reliefGeometry, reliefShader, reliefShaderKey, useLevels } from "./relief";
 import { usePixelTexture } from "./textures";
 
 const FLASH_MS = 900;
 const PLAN_STAGGER_MS = 70;
-const PLAN_FADE_MS = 420;
-const SPRITE_POP_DELAY = 240;
-const SPRITE_POP_STAGGER = 70;
+const PLAN_FADE_MS = 520;
+const REVEAL_MS = 950;
+const SPRITE_POP_DELAY = 380;
+const SPRITE_POP_STAGGER = 80;
+const GROW_DELAY_MS = 90;
 
 const COPY_COLORS = { shallow: "#a78bfa", deep: "#60a5fa" } as const;
 const RING_GEO = new THREE.RingGeometry(0.9, 1.0, 6, 1, Math.PI / 6);
-const SCAN_GEO = new THREE.BufferGeometry().setFromPoints(hexOutlinePoints(0.8, 0));
 const SEL_GEO = new THREE.BufferGeometry().setFromPoints(hexOutlinePoints(1.0, 0));
+const RIM_GEO = new THREE.BufferGeometry().setFromPoints(hexOutlinePoints(0.995, 0));
 const NO_RAYCAST = () => undefined;
 const SHADOW_GEO = new THREE.CircleGeometry(0.5, 20);
 const SPRITE_GEO = new THREE.PlaneGeometry(1, 1).translate(0, 0.5, 0); // anchored at the bottom
+const GOLD = new THREE.Color("#fbbf24");
 
-// All accepted tiles share one height: relief lives in the art (painted cliffs + heightmap layer),
-// so neighbouring faces meet flush and the ground reads as one continuous surface.
+// All accepted tiles share one height: relief lives in the art (heightmap layer), so neighbouring
+// faces meet flush and the ground reads as one continuous surface.
 export const TILE_HEIGHT = 0.16;
-
-function biomeTint(biome: string | null | undefined): string {
-  if (!biome) return "#94a3b8";
-  let h = 0;
-  for (const c of biome) h = (h * 31 + c.charCodeAt(0)) % 360;
-  return `hsl(${h}, 45%, 55%)`;
-}
+const FORMING_HEIGHT = 0.07;
 
 const phaseOf = (s: string) => {
   let h = 0;
   for (const c of s) h = (h * 33 + c.charCodeAt(0)) % 1000;
   return h / 159;
 };
+const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+const easeOut = (v: number) => 1 - (1 - v) ** 3;
 
 export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string }) {
   const tile = useStore((s) => s.tiles[tileKey]);
@@ -46,8 +46,11 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
   const plannedAt = useStore((s) => s.plannedAt[tileKey]);
   const selected = useStore((s) => s.selected === tileKey);
   const origin = useStore((s) => (s.activeRunId ? s.runs[s.activeRunId]?.origin : undefined));
+  const biome = tile.biome ?? tile.directive?.biome ?? null;
+  const biomeMat = useStore((s) => (biome ? s.libMaterials[biome] : undefined));
   const status = tile.status;
   const accepted = status === "accepted";
+  const forming = status === "planned" || status === "generating" || status === "reviewing";
   const groundLayer = tile.layers?.find((l) => l.kind === "ground");
   const tex = usePixelTexture(accepted ? (groundLayer?.asset_id ?? tile.asset_id) : tile.preview_asset_id);
   const sprites = accepted ? (tile.layers ?? []).filter((l) => l.kind === "sprite") : [];
@@ -55,24 +58,28 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
   const group = useRef<THREE.Group>(null);
   const body = useRef<THREE.Mesh>(null);
   const bodyMat = useRef<THREE.MeshStandardMaterial>(null);
+  const reliefMesh = useRef<THREE.Mesh>(null);
+  const face = useRef<THREE.Mesh>(null);
   const ring = useRef<THREE.Mesh>(null);
   const ringMat = useRef<THREE.MeshBasicMaterial>(null);
-  const scan = useRef<THREE.LineLoop>(null);
+  const rim = useRef<THREE.LineLoop>(null);
+  const rimMat = useRef<THREE.LineBasicMaterial>(null);
   const sel = useRef<THREE.LineLoop>(null);
   const selMat = useRef<THREE.LineBasicMaterial>(null);
   const shadowMat = useRef<THREE.MeshBasicMaterial>(null);
-  const baseEmissive = useRef("#000000");
   const rise = useRef(new Spring(0));
   const lift = useRef(new Spring(0));
   const scale = useRef(new Spring(1));
+  const plinth = useRef(new Spring(accepted ? TILE_HEIGHT : 0));
+  const grow = useRef(new Spring(1));
+  const fill = useRef(0);
+  const lastTex = useRef<THREE.Texture | null>(null);
+  const texReadyAt = useRef(0);
 
   const [x, z] = hexToWorld(tile.q, tile.r);
-  const height = accepted ? TILE_HEIGHT : 0.08;
   const texW = (tex?.image as { width?: number } | undefined)?.width;
-  const faceGeo = useMemo(
-    () => (texW && texW > 8 ? tileFaceGeometry(tile.q, tile.r, texW - 3) : SHARED.face),
-    [tile.q, tile.r, texW],
-  );
+  const P = texW && texW > 8 ? texW - 3 : 64;
+  const faceGeo = useMemo(() => tileFaceGeometry(tile.q, tile.r, P), [tile.q, tile.r, P]);
   const heightLayer = accepted ? tile.layers?.find((l) => l.kind === "height") : undefined;
   const levels = useLevels(heightLayer?.asset_id);
   const reliefGeo = useMemo(
@@ -84,6 +91,7 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
   );
   const isCopy = accepted && !!tile.copy_mode;
   const planDelay = origin ? hexDistance(origin, tile) * PLAN_STAGGER_MS : 0;
+  const neighbourKeys = useMemo(() => DIRECTIONS.map(([dq, dr]) => hexKey(tile.q + dq, tile.r + dr)), [tile.q, tile.r]);
   const ringColor = useMemo(
     () =>
       tile.copy_mode
@@ -92,39 +100,74 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
     [tile.copy_mode, tile.side_color],
   );
 
-  // Landing: generated tiles spring up out of the ground; copies are stamped down from above.
+  // the tile's palette (its biome material's ramp once designed); colours ease to new targets
+  const formingMat = useMemo(() => makeFormingMaterial(phaseOf(tileKey) * 13.7), [tileKey]);
+  useEffect(() => () => formingMat.dispose(), [formingMat]);
+  const palette = useMemo(() => tilePalette(biome, biomeMat), [biome, biomeMat]);
+  const paletteSnapped = useRef(false);
+  const U = formingMat.uniforms as unknown as FormingUniforms;
+
+  useEffect(() => {
+    if (tex && !accepted) {
+      lastTex.current = tex;
+      texReadyAt.current = Date.now();
+    }
+  }, [tex, accepted]);
+
+  // Landing: generated tiles grow their relief out of the surface; copies are stamped from above.
   useEffect(() => {
     if (!accepted || !acceptedAt) return;
-    rise.current.snap(isCopy ? 3.4 : -height * 1.9);
-    scale.current.snap(isCopy ? 1 : 0.72);
-  }, [accepted, acceptedAt, isCopy, height]);
+    if (isCopy) {
+      rise.current.snap(3.4);
+      grow.current.snap(1);
+    } else {
+      grow.current.snap(0.02);
+      scale.current.snap(0.94);
+    }
+  }, [accepted, acceptedAt, isCopy]);
 
   useFrame(({ clock }, dt) => {
     const g = group.current;
     if (!g) return;
     const now = Date.now();
     const t = clock.elapsedTime;
-    const hovered = useStore.getState().hover === tileKey;
+    const st = useStore.getState();
+    const hovered = st.hover === tileKey;
 
+    // --- transforms
     const y = rise.current.step(0, dt, isCopy ? 320 : 150, isCopy ? 13 : 11);
-    const l = lift.current.step(selected ? 0.34 : hovered && accepted ? 0.06 : 0, dt, 210, 19);
-    const sc = scale.current.step(1, dt, 180, 14);
+    const l = lift.current.step(selected ? 0.34 : hovered && !forming ? 0.06 : 0, dt, 210, 19);
+    const sc = scale.current.step(1, dt, 240, 12);
+    const plinthTarget = accepted ? TILE_HEIGHT : status === "planned" && !tile.attempts ? 0 : FORMING_HEIGHT;
+    const ph = plinth.current.step(plinthTarget, dt, 140, 16);
     let shake = 0;
     if (rejectedAt && now - rejectedAt < FLASH_MS) {
       const k = (now - rejectedAt) / FLASH_MS;
-      shake = Math.sin(k * 42) * 0.07 * (1 - k);
+      shake = Math.sin(k * 42) * 0.05 * (1 - k);
     }
     g.position.set(x + shake, y + l, z);
     g.scale.setScalar(sc);
+    if (body.current) {
+      body.current.visible = ph > 0.004;
+      body.current.scale.y = Math.max(0.001, ph);
+      body.current.position.y = ph / 2;
+    }
+    if (face.current) face.current.position.y = ph + 0.003;
+    if (reliefMesh.current) {
+      reliefMesh.current.position.y = ph + 0.002;
+      const growing = !acceptedAt || now - acceptedAt > GROW_DELAY_MS;
+      reliefMesh.current.scale.y = Math.max(0.02, grow.current.step(growing ? 1 : 0.02, dt, 120, 9));
+    }
     if (shadowMat.current) shadowMat.current.opacity = Math.min(0.55, l * 1.6);
     if (sel.current && selMat.current) {
       sel.current.visible = selected;
+      sel.current.position.y = ph + 0.01;
       selMat.current.opacity = 0.6 + 0.4 * Math.sin(t * 4);
     }
 
-    // shockwave ring when the tile lands
+    // --- shockwave ring when the tile lands
     if (ring.current && ringMat.current) {
-      const landAt = isCopy ? 170 : 260;
+      const landAt = isCopy ? 170 : 120;
       const rk = acceptedAt ? (now - acceptedAt - landAt) / 1000 : -1;
       const vis = accepted && rk > 0 && rk < 1;
       ring.current.visible = vis;
@@ -133,32 +176,67 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
         ringMat.current.opacity = 0.9 * (1 - rk) * (1 - rk);
       }
     }
-    if (scan.current) {
-      scan.current.visible = status === "generating";
-      scan.current.rotation.y = t * 1.6;
-      scan.current.position.y = 0.25 + 0.12 * Math.sin(t * 3 + tile.q);
-    }
 
+    // --- palette (eases when the material artist delivers the real ramp)
+    const k = paletteSnapped.current ? 1 - Math.exp(-3 * dt) : 1;
+    paletteSnapped.current = true;
+    U.uPal.value.forEach((c, i) => c.lerp(palette[i], k));
+
+    // --- body colour
     const m = bodyMat.current;
-    if (!m) return;
-    const flash = rejectedAt && now - rejectedAt < FLASH_MS ? 1 - (now - rejectedAt) / FLASH_MS : 0;
-    if (status === "generating") {
-      const p = 0.5 + 0.5 * Math.sin(t * 5 + tile.q * 0.7 + tile.r * 1.3);
-      m.emissiveIntensity = 0.35 + 0.65 * p;
-      m.opacity = 0.35 + 0.3 * p;
-      if (body.current) body.current.scale.y = 0.06 + 0.1 * p;
-    } else if (status === "reviewing") {
-      m.emissiveIntensity = 0.4 + 0.3 * Math.sin(t * 3);
-    } else if (status === "planned") {
-      const appear = plannedAt ? Math.max(0, Math.min(1, (now - plannedAt - planDelay) / PLAN_FADE_MS)) : 1;
-      m.opacity = appear * (0.16 + 0.08 * Math.sin(t * 1.5 + tile.q + tile.r));
+    if (m) {
+      if (accepted) {
+        m.color.set(tile.side_color ?? "#3a3f4b");
+        m.emissiveIntensity = 0;
+        m.opacity = 1;
+        m.transparent = false;
+      } else {
+        m.color.copy(U.uPal.value[0]).multiplyScalar(0.8);
+        m.emissive.copy(U.uPal.value[3]);
+        m.emissiveIntensity = 0.12 + 0.08 * Math.sin(t * 2.4 + phaseOf(tileKey));
+        m.transparent = true;
+        m.opacity = 0.92;
+      }
+      if (rejectedAt && now - rejectedAt < FLASH_MS) {
+        m.emissive.set("#ef4444");
+        m.emissiveIntensity = (1 - (now - rejectedAt) / FLASH_MS) * 1.2;
+      }
     }
-    if (flash > 0) {
-      m.emissive.set("#ef4444");
-      m.emissiveIntensity = flash * 1.4;
-    } else {
-      m.emissive.set(baseEmissive.current);
-      if (accepted || status === "failed" || status === "intentionally_empty") m.emissiveIntensity = 0;
+    if (!forming) return;
+
+    // --- forming surface
+    const since = st.statusAt[tileKey] ? now - st.statusAt[tileKey] : 0;
+    U.uTime.value = t;
+    const retry = status === "planned" && !!tile.attempts;
+    U.uState.value = status === "planned" && !retry ? 0 : 1;
+    U.uAppear.value = plannedAt ? clamp01((now - plannedAt - planDelay) / PLAN_FADE_MS) : 1;
+    let pulse = 0;
+    for (const nk of neighbourKeys) {
+      const at = st.acceptedAt[nk];
+      if (at && now > at) pulse = Math.max(pulse, Math.exp(-(now - at) / 650));
+    }
+    U.uPulse.value = pulse;
+    const fillTarget =
+      status === "reviewing" ? 1 : status === "generating" ? 0.12 + 0.86 * (1 - Math.exp(-since / 7000)) : fill.current;
+    fill.current += (fillTarget - fill.current) * (1 - Math.exp(-4 * dt));
+    U.uFill.value = fill.current;
+    const recentlyRejected = !!rejectedAt && now - rejectedAt < FLASH_MS;
+    const map = tex ?? (recentlyRejected ? lastTex.current : null);
+    U.uMap.value = map;
+    U.uHasMap.value = map ? 1 : 0;
+    const reveal = tex ? easeOut(clamp01((now - texReadyAt.current) / REVEAL_MS)) : 0;
+    U.uReveal.value = recentlyRejected ? Math.max(0, 1 - (now - rejectedAt) / 700) : reveal;
+    U.uScan.value = status === "reviewing" && tex ? clamp01((now - texReadyAt.current - REVEAL_MS) / 400) : 0;
+    U.uGlitch.value = recentlyRejected ? 1 - (now - rejectedAt) / FLASH_MS : 0;
+    formingMat.depthWrite = U.uState.value > 0.5;
+
+    // rim: traces the hex in the palette's light tone while forming, gold while reviewed
+    if (rim.current && rimMat.current) {
+      rim.current.visible = U.uState.value > 0.5;
+      rim.current.position.y = ph + 0.006;
+      const reviewing = status === "reviewing";
+      rimMat.current.color.copy(reviewing ? GOLD : U.uPal.value[4]);
+      rimMat.current.opacity = (reviewing ? 0.75 : 0.45) + 0.25 * Math.sin(t * (reviewing ? 3.2 : 5.0));
     }
   });
 
@@ -169,33 +247,20 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
     s.select(s.selected === tileKey ? null : tileKey);
   };
 
-  if (status === "intentionally_empty" || status === "failed" || status === "planned") {
-    const color = status === "failed" ? "#7f1d1d" : status === "planned" ? biomeTint(tile.biome) : "#07080c";
-    baseEmissive.current = color;
+  if (status === "intentionally_empty" || status === "failed") {
+    const color = status === "failed" ? "#7f1d1d" : "#07080c";
     return (
-      <group ref={group} position={[x, 0, z]}>
+      <group position={[x, 0, z]}>
         <mesh geometry={SHARED.emptyFace} position={[0, 0.006, 0]}>
-          <meshStandardMaterial
-            ref={bodyMat}
-            color={color}
-            transparent
-            opacity={status === "failed" ? 0.75 : status === "planned" ? 0 : 0.9}
-            emissive={color}
-            emissiveIntensity={0}
-            depthWrite={false}
-          />
+          <meshStandardMaterial color={color} transparent opacity={status === "failed" ? 0.75 : 0.9} depthWrite={false} />
         </mesh>
       </group>
     );
   }
 
-  const bodyColor = accepted ? (tile.side_color ?? "#3a3f4b") : status === "reviewing" ? "#f59e0b" : "#22d3ee";
-  const translucent = !accepted;
-  baseEmissive.current = bodyColor;
-
   return (
     <>
-      <mesh geometry={SHARED.emptyFace} position={[x, 0.003, z]} rotation={[0, 0, 0]} raycast={NO_RAYCAST}>
+      <mesh geometry={SHARED.emptyFace} position={[x, 0.003, z]} raycast={NO_RAYCAST}>
         <meshBasicMaterial ref={shadowMat} color="#000000" transparent opacity={0} depthWrite={false} />
       </mesh>
       <group
@@ -207,20 +272,14 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
           if (useStore.getState().hover !== tileKey) useStore.getState().setHover(tileKey);
         }}
       >
-        <mesh ref={body} geometry={SHARED.prism} position={[0, height / 2, 0]} scale={[1, height, 1]}>
-          <meshStandardMaterial
-            ref={bodyMat}
-            color={bodyColor}
-            emissive={bodyColor}
-            emissiveIntensity={translucent ? 0.5 : 0}
-            roughness={0.95}
-            transparent={translucent}
-            opacity={translucent ? 0.55 : 1}
-          />
+        <mesh ref={body} geometry={SHARED.prism} visible={false}>
+          <meshStandardMaterial ref={bodyMat} roughness={0.95} />
         </mesh>
-        {tex && (
-          reliefGeo ? (
-            <mesh key="relief" geometry={reliefGeo} position={[0, height + 0.002, 0]}>
+        {forming && <mesh ref={face} geometry={faceGeo} material={formingMat} renderOrder={2} />}
+        {accepted &&
+          tex &&
+          (reliefGeo ? (
+            <mesh key="relief" ref={reliefMesh} geometry={reliefGeo}>
               {/* terraces extruded from the heightmap; unlit texture, walls shaded per vertex */}
               <meshBasicMaterial
                 map={tex}
@@ -231,31 +290,37 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
               />
             </mesh>
           ) : (
-            <mesh key="flat" geometry={faceGeo} position={[0, height + 0.002, 0]}>
+            <mesh key="flat" geometry={faceGeo} position={[0, TILE_HEIGHT + 0.002, 0]}>
               {/* unlit: the pixel art shows its exact colours */}
-              <meshBasicMaterial map={tex} transparent={!accepted} opacity={accepted ? 1 : 0.85} alphaTest={0.5} />
+              <meshBasicMaterial map={tex} alphaTest={0.5} />
             </mesh>
-          )
-        )}
+          ))}
         {sprites.map((layer, i) => (
           <SpriteBillboard
             key={`${layer.asset_id}-${i}`}
             layer={layer}
-            top={height + (levels ? levelAt(levels, tile.q, tile.r, layer.x, layer.y) * LEVEL_STEP : 0)}
+            top={TILE_HEIGHT + (levels ? levelAt(levels, tile.q, tile.r, layer.x, layer.y) * LEVEL_STEP : 0)}
             tileX={x}
             tileZ={z}
             index={i}
             landedAt={acceptedAt}
           />
         ))}
-        <lineLoop ref={sel} geometry={SEL_GEO} position={[0, height + 0.01, 0]} visible={false} raycast={NO_RAYCAST}>
+        <lineLoop ref={rim} geometry={RIM_GEO} visible={false} raycast={NO_RAYCAST}>
+          <lineBasicMaterial ref={rimMat} transparent depthWrite={false} />
+        </lineLoop>
+        <lineLoop ref={sel} geometry={SEL_GEO} visible={false} raycast={NO_RAYCAST}>
           <lineBasicMaterial ref={selMat} color="#fde68a" transparent depthTest={false} />
         </lineLoop>
-        <lineLoop ref={scan} geometry={SCAN_GEO} visible={false} raycast={NO_RAYCAST}>
-          <lineBasicMaterial color="#67e8f9" transparent opacity={0.9} />
-        </lineLoop>
       </group>
-      <mesh ref={ring} geometry={RING_GEO} position={[x, 0.02, z]} rotation={[-Math.PI / 2, 0, 0]} visible={false} raycast={NO_RAYCAST}>
+      <mesh
+        ref={ring}
+        geometry={RING_GEO}
+        position={[x, 0.02, z]}
+        rotation={[-Math.PI / 2, 0, 0]}
+        visible={false}
+        raycast={NO_RAYCAST}
+      >
         <meshBasicMaterial
           ref={ringMat}
           color={ringColor}

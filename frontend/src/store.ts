@@ -36,6 +36,8 @@ interface State {
   acceptedAt: Record<string, number>;
   rejectedAt: Record<string, number>;
   plannedAt: Record<string, number>;
+  /** when each tile last changed status (live events only): drives build animations */
+  statusAt: Record<string, number>;
   /** grid ripple from where the latest run started */
   ripple: { q: number; r: number; at: number } | null;
   /** session library (agent-designed assets), live-updated from events */
@@ -93,6 +95,7 @@ export const useStore = create<State>((set, get) => ({
   acceptedAt: {},
   rejectedAt: {},
   plannedAt: {},
+  statusAt: {},
   ripple: null,
   libSprites: {},
   libMaterials: {},
@@ -138,6 +141,7 @@ export const useStore = create<State>((set, get) => ({
       acceptedAt: {},
       rejectedAt: {},
       plannedAt: {},
+  statusAt: {},
       libSprites: libFrom(detail.world),
       libMaterials: detail.world.materials ?? {},
       libraryBusy: 0,
@@ -204,6 +208,9 @@ export const useStore = create<State>((set, get) => ({
         patch.acceptedAt = { ...s.acceptedAt, [key]: Date.now() };
         // Copies land at the bottom of their stamp animation, generated tiles at the rise's peak.
         window.setTimeout(() => sfx.play(tile.copy_mode ? "stamp" : "land"), tile.copy_mode ? 240 : 260);
+      }
+      if (live && tile.status !== prev?.status) {
+        patch.statusAt = { ...(patch.statusAt ?? s.statusAt), [key]: Date.now() };
       }
       if (live && tile.status === "planned" && prev?.status !== "planned" && !prev?.attempts) {
         patch.plannedAt = { ...s.plannedAt, [key]: Date.now() };
