@@ -19,6 +19,7 @@ const RING_GEO = new THREE.RingGeometry(0.9, 1.0, 6, 1, Math.PI / 6);
 const SCAN_GEO = new THREE.BufferGeometry().setFromPoints(hexOutlinePoints(0.8, 0));
 const SEL_GEO = new THREE.BufferGeometry().setFromPoints(hexOutlinePoints(1.0, 0));
 const NO_RAYCAST = () => undefined;
+const SHADOW_GEO = new THREE.CircleGeometry(0.5, 20);
 const SPRITE_GEO = new THREE.PlaneGeometry(1, 1).translate(0, 0.5, 0); // anchored at the bottom
 
 // All accepted tiles share one height: relief lives in the art (painted cliffs + heightmap layer),
@@ -327,11 +328,24 @@ function SpriteBillboard({
 
   if (!tex) return null;
   return (
-    <group ref={grp} position={[layer.x, top, layer.y]}>
-      {/* not pickable: a sprite overlaps the tile behind it on screen and would steal its clicks */}
-      <mesh ref={mesh} geometry={SPRITE_GEO} scale={[0.001, 0.001, 1]} raycast={NO_RAYCAST}>
-        <meshBasicMaterial ref={mat} map={tex} transparent alphaTest={0.5} side={THREE.DoubleSide} />
+    <>
+      {/* soft contact shadow: grounds the upright billboard on the terrain */}
+      <mesh
+        geometry={SHADOW_GEO}
+        position={[layer.x, top + 0.004, layer.y + 0.01]}
+        rotation={[-Math.PI / 2, 0, 0]}
+        scale={[w * 0.62, w * 0.3, 1]}
+        raycast={NO_RAYCAST}
+        renderOrder={1}
+      >
+        <meshBasicMaterial color="#000000" transparent opacity={0.28} depthWrite={false} />
       </mesh>
-    </group>
+      <group ref={grp} position={[layer.x, top, layer.y]}>
+        {/* not pickable: a sprite overlaps the tile behind it on screen and would steal its clicks */}
+        <mesh ref={mesh} geometry={SPRITE_GEO} scale={[0.001, 0.001, 1]} raycast={NO_RAYCAST}>
+          <meshBasicMaterial ref={mat} map={tex} transparent alphaTest={0.5} side={THREE.DoubleSide} />
+        </mesh>
+      </group>
+    </>
   );
 }

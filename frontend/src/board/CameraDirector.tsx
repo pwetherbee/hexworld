@@ -42,7 +42,7 @@ export function activityFrame(keys: string[]): Goal | null {
   cz /= pts.length;
   let radius = 0;
   for (const [x, z] of pts) radius = Math.max(radius, Math.hypot(x - cx, z - cz));
-  return { target: new THREE.Vector3(cx, 0, cz), distance: THREE.MathUtils.clamp(8 + radius * 1.4, 8, 30) };
+  return { target: new THREE.Vector3(cx, 0, cz), distance: THREE.MathUtils.clamp(12 + radius * 1.3, 12, 34) };
 }
 
 /** Auto-follow: frames the active build, rate limited, yields to the user; also eases toward a
