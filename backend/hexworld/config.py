@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     comfyui_workflow_dir: Path = REPO_ROOT / "services" / "comfyui" / "workflows"
     comfyui_timeout_s: float = 180.0
     openai_image_model: str = "gpt-image-1"
+    sprite_image_model: str = "gpt-image-2.5-flare"  # "" = sprites drawn with the DSL instead
+    sprite_image_quality: str = "low"
     gen_px: int = 1024  # generation resolution before pixelization
 
     # ---- concurrency

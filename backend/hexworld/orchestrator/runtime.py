@@ -78,6 +78,17 @@ class Runtime:
         self.bus = EventBus()
         self.store.add_listener(self.bus.publish)
         self.model_factory = model_factory or build_models(settings)
+        # Sprite painter (image model); tests run without one and fall back to the sprite DSL.
+        self.painter = None
+        if model_factory is None and settings.llm == "openai" and settings.sprite_image_model:
+            from hexworld.art.paint import OpenAISpritePainter
+
+            self.painter = OpenAISpritePainter(
+                api_key=settings.openai_api_key,
+                base_url=settings.openai_base_url,
+                model=settings.sprite_image_model,
+                quality=settings.sprite_image_quality,
+            )
         self.llm_name = "fake" if settings.llm == "fake" or model_factory else f"adk+{settings.llm}"
         self.image = image or build_image(settings)
         self.gpu_sem = asyncio.Semaphore(settings.image_concurrency)

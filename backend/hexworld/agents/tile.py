@@ -38,7 +38,6 @@ def design_model(world: World) -> type[BaseModel]:
         edges=(list[edge], Field(description="exactly 6, index = edge number (0 E,1 NE,2 NW,3 W,4 SW,5 SE)")),
         art_prompt=(str, Field(description="1-3 sentences, GROUND only, top-down")),
         negative_prompt=(str, ""),
-        relief=(int, Field(description="0 liquid/flat .. 3 mountainous (render height)")),
         props=(
             list[PropSpec],
             Field(default_factory=list, description="0 or 1 landmark (the directive's feature)"),
@@ -205,34 +204,38 @@ class TileAgent:
             holder=self.holder,
         )
 
-    async def design(
-        self,
-        *,
-        neighbors: list[dict[str, Any]],
-        context_png: bytes | None,
-        anchor_png: bytes | None,
-        parent: Span | None,
-    ) -> TileDesign | None:
+    async def design(self, *, neighbors: list[dict[str, Any]], parent: Span | None) -> TileDesign | None:
+        """Lean brief: only what this tile's decisions need. Images/library are behind tools."""
         w = self.world
-        assert w.spec is not None and w.style is not None
-        payload = {
+        assert w.spec is not None
+        compact = [
+            {
+                k: n[k]
+                for k in ("edge", "direction", "status", "biome", "facing_edge", "intent")
+                if n.get(k) is not None
+            }
+            for n in neighbors
+            if n.get("status") not in ("empty", "out_of_world")
+        ]
+        payload: dict[str, Any] = {
             "task": "tile_design",
-            "world": w.spec.model_dump(),
-            "style": w.style.model_dump(exclude={"palette"}),
-            "attributes": [a.model_dump() for a in w.tile_attributes],
-            "directive": self.directive.model_dump(mode="json"),
-            "neighbors": neighbors,
-            "sprite_library": sorted(w.sprites),
+            "world": {
+                "title": w.spec.title,
+                "theme": w.spec.theme,
+                "terrain_vocabulary": w.spec.terrain_vocabulary,
+                "connector_vocabulary": w.spec.connector_vocabulary,
+            },
+            "attributes": [
+                a.model_dump(exclude={"enum_values"} if a.type not in ("enum", "enum_list") else None)
+                for a in w.tile_attributes
+            ],
+            "coord": self.directive.coord.model_dump(mode="json"),
+            "directive": self.directive.model_dump(mode="json", exclude={"duplicate", "coord"}),
+            "neighbors": compact,
         }
-        parts = [text_part(payload)]
-        if anchor_png:
-            parts += [text_part("World anchor tile (style reference):"), image_part(anchor_png)]
-        if context_png:
-            parts += [
-                text_part("Map around your tile (your slot is the dark centre hex):"),
-                image_part(context_png),
-            ]
-        res = await self.handle.run(parts, parent, max_calls=6)
+        if self.directive.features:
+            payload["sprite_library"] = sorted(w.sprites)
+        res = await self.handle.run([text_part(payload)], parent, max_calls=6)
         return res.get("design")
 
     async def revise(self, feedback: str, *, parent: Span | None) -> TileDesign | None:

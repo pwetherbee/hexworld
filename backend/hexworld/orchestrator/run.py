@@ -39,9 +39,10 @@ from hexworld.agents.llm import BudgetExceeded, RunBudget
 from hexworld.agents.tile import TileAgent
 from hexworld.art.backend import ImageRequest
 from hexworld.art.composite import context_canvas, crop_target, neighborhood_png, render_region, to_png
-from hexworld.art.pixelize import PixelTile, crisp_tile, hex_mask, load_tile, pixelize
-from hexworld.art.procedural import fallback_material, ramp_hexes
-from hexworld.art.sprites import Placed, SpriteArt, flatten, preview_png, rasterize, scatter_positions
+from hexworld.art.grid import TileCanvas
+from hexworld.art.pixelize import PixelTile, crisp_tile, load_tile, pixelize_to_canvas
+from hexworld.art.procedural import fallback_material, ramp_hexes, render_ground
+from hexworld.art.sprites import Placed, SpriteArt, flatten, preview_png, scatter_positions
 from hexworld.domain import (
     NO_COPY,
     Attempt,
@@ -264,6 +265,8 @@ class RunExecutor:
         w = self.world
         if w.spec is None:
             w.spec, w.style, w.tile_attributes = plan.world, plan.style, plan.tile_attributes
+            # engine resolution (64px tiles, 8px blocks), not an art-direction choice
+            w.style = w.style.model_copy(update={"tile_px": 64})
             w.name = plan.world.title or w.name
         else:
             # Extension of an existing world: style + attributes are locked; vocabularies may grow.
@@ -441,9 +444,9 @@ class RunExecutor:
 
         async def make() -> SpriteEntry | None:
             async with self.tracer.span("library.sprite", parent, kind=key) as sp:
-                artist_agent = artist.SpriteArtist(self.kit, world=w, kind=key)
+                artist_agent = artist.SpriteArtist(self.kit, world=w, kind=key, painter=self.rt.painter)
                 try:
-                    program = await artist_agent.design(
+                    result = await artist_agent.design(
                         context=context, anchor_png=self._anchor_png(), parent=sp
                     )
                 except BudgetExceeded as e:
@@ -452,30 +455,34 @@ class RunExecutor:
                 except Exception as e:  # noqa: BLE001 - the tile simply goes without this prop
                     sp.set(error=str(e)[:200])
                     return None
-                if program is None:
+                if result is None:
                     sp.set(error="artist did not submit")
                     return None
                 self._artists[key] = artist_agent
-                art = await asyncio.to_thread(rasterize, program)
+                art = result["art"]
                 asset_id = self.store.put_asset(
                     art.strip_png(), {"kind": "sprite", "sprite": key, "run_id": self.run.id}
                 )
                 entry = SpriteEntry(
                     kind=key,
-                    program=program,
+                    program=result.get("program"),
+                    prompt=result.get("prompt"),
                     asset_id=asset_id,
                     px_w=art.w,
                     px_h=art.h,
                     frames=len(art.frames),
                     fps=art.fps,
-                    motion=program.motion,
+                    motion=art.motion,
                     run_id=self.run.id,
                 )
                 w.sprites[key] = entry
                 self._sprite_arts[asset_id] = art
                 self.store.put_world(w)
                 sp.set(
-                    asset_id=asset_id, size=[art.w, art.h], frames=len(art.frames), shapes=len(program.shapes)
+                    asset_id=asset_id,
+                    size=[art.w, art.h],
+                    frames=len(art.frames),
+                    painted=bool(result.get("prompt")),
                 )
                 self.tracer.emit(
                     "library.sprite_added",
@@ -531,9 +538,11 @@ class RunExecutor:
         )
         async with self.rt.gpu_sem:
             res = await self.rt.image.generate(req)
-        pix = await asyncio.to_thread(crisp_tile, res.png, P)
+        canvas = TileCanvas(t.hex, P)
+        pix = await asyncio.to_thread(crisp_tile, res.png, canvas)
         ground_id = self.store.put_asset(pix.png, {"kind": "ground", "run_id": self.run.id})
         self._arrays[ground_id] = pix.rgba
+        height_id = self._height_asset(res.height_png, t, biome, t.edges, materials, P)
         placed = []
         for layer in sprites:
             art = self._sprite_arts.get(layer.asset_id) or SpriteArt.from_strip(
@@ -541,14 +550,15 @@ class RunExecutor:
             )
             self._sprite_arts[layer.asset_id] = art
             placed.append(Placed(layer.label, art, layer.x, layer.y, layer.width / (art.w / (P / 2.0))))
-        flat = flatten(pix.rgba, placed, P)
-        flat[~hex_mask(P)] = 0
+        flat = flatten(pix.rgba, placed, canvas)
+        flat[~canvas.mask()] = 0
         flat_id = self.store.put_asset(to_png(Image.fromarray(flat, "RGBA")), {"kind": "tile_preview"})
         self._arrays[flat_id] = flat
         t.ground_asset_id = ground_id
         t.asset_id = flat_id
         t.layers = [
-            TileLayer(kind="ground", asset_id=ground_id, px_w=P, px_h=P),
+            TileLayer(kind="ground", asset_id=ground_id, px_w=canvas.C, px_h=canvas.C),
+            TileLayer(kind="height", asset_id=height_id, px_w=canvas.C, px_h=canvas.C),
             *[s.model_copy() for s in sprites],
         ]
         t.side_color = pix.side_color
@@ -625,33 +635,36 @@ class RunExecutor:
         old = self.world.sprites.get(key)
         if old is None:
             return
-        artist_agent = self._artists.get(key) or artist.SpriteArtist(self.kit, world=self.world, kind=key)
+        artist_agent = self._artists.get(key) or artist.SpriteArtist(
+            self.kit, world=self.world, kind=key, painter=self.rt.painter
+        )
         self._artists[key] = artist_agent
         async with self.tracer.span("library.sprite_revise", parent, kind=key, feedback=feedback[:300]) as sp:
             try:
-                program = await artist_agent.revise(feedback, parent=sp)
+                result = await artist_agent.revise(feedback, parent=sp)
             except BudgetExceeded as e:
                 self._budget_error = e
                 return
             except Exception as e:  # noqa: BLE001
                 sp.set(error=str(e)[:200])
                 return
-            if program is None:
+            if result is None:
                 return
-            art = await asyncio.to_thread(rasterize, program)
+            art = result["art"]
             asset_id = self.store.put_asset(
                 art.strip_png(), {"kind": "sprite", "sprite": key, "revision": True}
             )
             self._sprite_arts[asset_id] = art
             entry = old.model_copy(
                 update={
-                    "program": program,
+                    "program": result.get("program"),
+                    "prompt": result.get("prompt"),
                     "asset_id": asset_id,
                     "px_w": art.w,
                     "px_h": art.h,
                     "frames": len(art.frames),
                     "fps": art.fps,
-                    "motion": program.motion,
+                    "motion": art.motion,
                 }
             )
             self.world.sprites[key] = entry
@@ -709,8 +722,9 @@ class RunExecutor:
                 for layer in t.layers
                 if layer.kind == "sprite"
             ]
-            flat = flatten(self._array(t.ground_asset_id), placed, P)
-            flat[~hex_mask(P)] = 0
+            canvas = TileCanvas(t.hex, P)
+            flat = flatten(self._array(t.ground_asset_id), placed, canvas)
+            flat[~canvas.mask()] = 0
             t.asset_id = self.store.put_asset(to_png(Image.fromarray(flat, "RGBA")), {"kind": "tile_preview"})
             self._arrays[t.asset_id] = flat
         self._save_tile(t)
@@ -852,7 +866,14 @@ class RunExecutor:
         return art
 
     async def _compose_layers(
-        self, design: TileDesign, t: Tile, ground: PixelTile, ground_id: str, variant: int, parent: Span
+        self,
+        design: TileDesign,
+        t: Tile,
+        ground: PixelTile,
+        ground_id: str,
+        height_id: str,
+        variant: int,
+        parent: Span,
     ) -> tuple[list[TileLayer], np.ndarray]:
         """Ground + prop sprites (designed on demand) + ambient scatter from the biome's material."""
         style = self.world.style
@@ -874,7 +895,11 @@ class RunExecutor:
             for kind, x, y, sc in scatter_positions(mat.scatter, (t.q, t.r), variant):
                 wanted.append((kind, x, y, sc, f"ambient on {design.biome}"))
         entries = await asyncio.gather(*[self._ensure_sprite(k, ctx, parent) for k, _, _, _, ctx in wanted])
-        layers = [TileLayer(kind="ground", asset_id=ground_id, px_w=P, px_h=P)]
+        canvas = TileCanvas(t.hex, P)
+        layers = [
+            TileLayer(kind="ground", asset_id=ground_id, px_w=canvas.C, px_h=canvas.C),
+            TileLayer(kind="height", asset_id=height_id, px_w=canvas.C, px_h=canvas.C),
+        ]
         placed: list[Placed] = []
         for (_kind, x, y, sc, _), e in zip(wanted, entries, strict=True):
             if e is None:
@@ -899,9 +924,59 @@ class RunExecutor:
                     motion=e.motion,
                 )
             )
-        flat = flatten(ground.rgba, placed, P)
-        flat[~hex_mask(P)] = 0
+        flat = flatten(ground.rgba, placed, canvas)
+        flat[~canvas.mask()] = 0
         return layers, flat
+
+    def _contact_sheet(self, cands: list[Candidate], labels: dict[Hex, int], P: int) -> bytes:
+        """One small panel per candidate (it + its settled neighbours), in a grid: bounded size no
+        matter how far apart the candidates are on the map."""
+        panels = []
+        for c in cands:
+            h = c.job.tile.hex
+            region = {h: c.flat if c.flat is not None else c.pix.rgba}
+            for n in h.neighbors():
+                nt = self.tiles.get(n)
+                if nt and nt.status == TileStatus.accepted and nt.asset_id:
+                    # context only: neighbours' GROUND, dimmed, so their landmarks are never
+                    # mistaken for the candidate's (the candidate is the one bright tile)
+                    ctx = self._array(nt.ground_asset_id or nt.asset_id).copy()
+                    ctx[..., :3] = (ctx[..., :3] * 0.45).astype(np.uint8)
+                    region[n] = ctx
+            panels.append(
+                render_region(
+                    region,
+                    tile_px=P,
+                    slots=h.neighbors(),
+                    labels={h: labels[h]},
+                    center=h,
+                    extent_px=int(P * 2.6),
+                    scale=2,
+                )
+            )
+        cols = min(4, len(panels))
+        rows = (len(panels) + cols - 1) // cols
+        w, hgt = panels[0].size
+        sheet = Image.new("RGBA", (cols * w + (cols - 1) * 6, rows * hgt + (rows - 1) * 6), (20, 22, 30, 255))
+        for i, pnl in enumerate(panels):
+            sheet.alpha_composite(pnl, ((i % cols) * (w + 6), (i // cols) * (hgt + 6)))
+        return to_png(sheet)
+
+    def _height_asset(
+        self, height_png: bytes | None, t: Tile, biome: str, edges: list[EdgeSpec], materials: dict, P: int
+    ) -> str:
+        """Relief layer: from the ground renderer when it provides one, otherwise computed from the
+        same materials (relief never depends on how the colours were produced)."""
+        if height_png is None:
+            _, heights = render_ground(
+                tile_px=P,
+                biome=biome,
+                edges=[e.model_dump() for e in edges],
+                coord=(t.q, t.r),
+                materials=materials,
+            )
+            height_png = to_png(Image.fromarray((heights * 40).astype(np.uint8), "L"))
+        return self.store.put_asset(height_png, {"kind": "height", "q": t.q, "r": t.r})
 
     # ================================================================== anchor bootstrap
 
@@ -959,7 +1034,8 @@ class RunExecutor:
         direct_every = max(6, len(pending) // 4)
         since_direct = 0
         self.tracer.emit(
-            "growth.scheduled", data={"pending": len(pending), "concurrency": cap, "direct_every": direct_every}
+            "growth.scheduled",
+            data={"pending": len(pending), "concurrency": cap, "direct_every": direct_every},
         )
         try:
             while pending or inflight:
@@ -1031,7 +1107,21 @@ class RunExecutor:
                         self._review_q.append((cand, fut))
                         self._review_ready.set()
                         v = await fut
-                        if v is None or v.accept:
+                        last_chance = (
+                            job.directive.simplified
+                            and job.attempts_this_run >= self.run.options.max_attempts
+                        )
+                        if v is not None and not v.accept and last_chance:
+                            # Out of attempts, but it passed every deterministic check: a settled tile
+                            # the reviewer dislikes beats a hole in the world (the director or a later
+                            # run can still redo it).
+                            self.tracer.emit(
+                                "tile.accepted_over_review",
+                                q=job.tile.q,
+                                r=job.tile.r,
+                                data={"feedback": v.feedback},
+                            )
+                        if v is None or v.accept or last_chance:
                             self._accept(cand, v)
                             await self._refresh_if_stale(cand)
                             jsp.set(outcome="accepted", attempts=job.attempts_this_run)
@@ -1228,12 +1318,7 @@ class RunExecutor:
                 async with self.tracer.span("tile.design", sp, revision=job.feedback is not None) as dsp:
                     if job.agent is None:
                         job.agent = TileAgent(self.kit, world=world, directive=job.directive, api=self)
-                        design = await job.agent.design(
-                            neighbors=neighbors,
-                            context_png=neighborhood_png(h, arrays_by_hex, P) if arrays_by_hex else None,
-                            anchor_png=anchor,
-                            parent=dsp,
-                        )
+                        design = await job.agent.design(neighbors=neighbors, parent=dsp)
                     else:
                         design = await job.agent.revise(job.feedback or "try again", parent=dsp)
                     job.feedback = None
@@ -1279,16 +1364,18 @@ class RunExecutor:
                 self.run.stats.images += 1
 
                 # 3) pixelize onto the master palette + hex mask
+                canvas = TileCanvas(h, P)
                 src = crop_target(res.png, P) if res.meta.get("framing") == "context" else res.png
                 pix = (
-                    await asyncio.to_thread(crisp_tile, src, P)
+                    await asyncio.to_thread(crisp_tile, src, canvas)
                     if res.meta.get("crisp")
-                    else await asyncio.to_thread(pixelize, src, style.palette, P)
+                    else await asyncio.to_thread(pixelize_to_canvas, src, style.palette, canvas)
                 )
 
                 # 4) deterministic checks
                 checks = check_candidate(
                     pix,
+                    canvas,
                     accepted_arrays,
                     max_seam_delta=self.s.max_seam_delta,
                     min_coverage=self.s.min_coverage,
@@ -1310,10 +1397,13 @@ class RunExecutor:
                     },
                 )
                 self._arrays[ground_id] = pix.rgba
+                height_id = self._height_asset(res.height_png, t, design.biome, design.edges, materials, P)
 
                 # 5) layers: prop sprites + ambient scatter on top of the ground
                 async with self.tracer.span("tile.layers", sp) as lsp:
-                    layers, flat = await self._compose_layers(design, t, pix, ground_id, variant, lsp)
+                    layers, flat = await self._compose_layers(
+                        design, t, pix, ground_id, height_id, variant, lsp
+                    )
                     lsp.set(sprites=[layer.label for layer in layers if layer.kind == "sprite"])
                 flat_png = to_png(Image.fromarray(flat, "RGBA"))
                 asset_id = self.store.put_asset(
@@ -1401,17 +1491,7 @@ class RunExecutor:
         assert style is not None
         P = style.tile_px
         labels = {c.job.tile.hex: i + 1 for i, c in enumerate(cands)}
-        region: dict[Hex, np.ndarray] = {}
-        slots: set[Hex] = set()
-        for c in cands:
-            h = c.job.tile.hex
-            region[h] = c.flat if c.flat is not None else c.pix.rgba
-            for n in h.neighbors():
-                slots.add(n)
-                nt = self.tiles.get(n)
-                if nt and nt.status == TileStatus.accepted and nt.asset_id and n not in region:
-                    region[n] = self._array(nt.asset_id)
-        composite = to_png(render_region(region, tile_px=P, slots=slots, labels=labels, scale=4))
+        composite = self._contact_sheet(cands, labels, P)
         comp_id = self.store.put_asset(composite, {"kind": "review_composite", "run_id": self.run.id})
         payload = [
             {
@@ -1425,7 +1505,6 @@ class RunExecutor:
                 },
                 "design": {
                     "summary": c.design.summary,
-                    "relief": c.design.relief,
                     "landmark": next((layer.label for layer in c.layers if layer.kind == "sprite"), None),
                     "art_prompt": c.design.art_prompt,
                     "edges": [e.model_dump() for e in c.design.edges],

@@ -1,32 +1,66 @@
-"""Ground renderer: interprets agent-written MaterialSpecs into crisp pixel-art ground layers.
+"""Ground renderer: interprets agent-written MaterialSpecs into Terraria-style block terrain.
 
-Each pixel gets a *material*: the tile's biome in the middle and the edge contract's terrain in a
-band along each edge, with a noise-perturbed boundary. Connectors (roads, rivers...) are materials
-painted along curved paths to the edge midpoints. Every pattern op is evaluated in world pixel
-coordinates, with seeds derived from the material name. Two tiles that agree on an edge therefore
-paint identical pixels on both sides of it.
+Art style (engine-level, not content): the world is one pixel grid (see art/grid.py) divided into
+square BLOCKS (8px at the default 64px tiles). Materials are assigned per block, so regions,
+roads and coastlines have clean block-grid edges instead of noisy pixel soup. Each block is drawn
+in its material's block style ('bevel': lit top-left edge, shaded bottom-right; 'outline': dark
+1px frame; 'flat'). Pattern ops add chunky block-level variation (patches/cellfill/stripes) and
+pixel-level detail (speckle/decals/cracks). Every block also gets a relief level (material base
+height + height ops), which is exported as a heightmap for the voxel renderer and shaded into the
+2D texture.
 
-This module holds no content. What a material looks like comes from the material sub-agent
-(`agents/artist.py`), via the world's session library.
+Each pixel's block takes the tile's biome in the middle and the edge contract's terrain in a
+band along each edge. All ops are evaluated in world coordinates with seeds derived from the
+material name, so tiles that agree on an edge paint identical blocks on both sides of it.
+
+This module holds no content: how a material looks comes from the material artist agent.
 """
 
 from __future__ import annotations
 
+import colorsys
 import math
 import zlib
 from dataclasses import dataclass
 
 import numpy as np
 
-from hexworld.agents.themes import base_color, hex_to_rgb, shade
+from hexworld.agents.themes import base_color, hex_to_rgb, rgb_to_hex, shade
+from hexworld.art.grid import TileCanvas
 from hexworld.domain.art import MaterialSpec, PatternOp
 from hexworld.hex import DIRECTION_ANGLES, SQRT3, Hex
 
 RAMP_FACTORS = {"outline": 0.42, "dark": 0.72, "base": 1.0, "light": 1.24, "hi": 1.5}
+MAX_LEVEL = 6
+
+
+def block_size(tile_px: int) -> int:
+    """Size of an art 'cell': shapes, patches and relief are evaluated on 2px cells (chunky
+    Terraria-scale pixels) with organic noise-warped contours, never on a coarse square grid."""
+    return 2
+
+
+def unit(tile_px: int) -> float:
+    """Feature scale (road width, wobble) relative to the tile."""
+    return tile_px / 8
+
+
+MAX_BASE_LUM = 0.8
+
+
+def ramp_base(color: str) -> str:
+    """Very pale bases (snow, sugar, marble) are pulled down to leave room for highlight tones;
+    otherwise their light/hi tones collapse into flat white and the texture disappears."""
+    r, g, b = hex_to_rgb(color)
+    h, lum, sat = colorsys.rgb_to_hls(r / 255, g / 255, b / 255)
+    if lum <= MAX_BASE_LUM:
+        return color
+    r2, g2, b2 = colorsys.hls_to_rgb(h, MAX_BASE_LUM, sat)
+    return rgb_to_hex((round(r2 * 255), round(g2 * 255), round(b2 * 255)))
 
 
 def ramp_hexes(color: str) -> list[str]:
-    return [shade(color, f) for f in RAMP_FACTORS.values()]
+    return [shade(ramp_base(color), f) for f in RAMP_FACTORS.values()]
 
 
 @dataclass
@@ -42,18 +76,17 @@ def ramp_for(spec: MaterialSpec, palette: list[str] | None = None) -> Ramp:
     """Exact ramp colours. Deliberately NOT snapped to the (growing) world palette: a material must
     render identically before and after later runs extend the palette, or old/new tiles won't meet."""
 
-    def snap(c: str) -> np.ndarray:
+    def col(c: str) -> np.ndarray:
         return np.array(hex_to_rgb(c), dtype=np.float32)
 
     return Ramp(
-        tones={t: snap(shade(spec.base_color, f)) for t, f in RAMP_FACTORS.items()},
-        accent=snap(spec.accent_color),
+        tones={t: col(shade(ramp_base(spec.base_color), f)) for t, f in RAMP_FACTORS.items()},
+        accent=col(spec.accent_color),
     )
 
 
 def fallback_material(name: str) -> MaterialSpec:
-    """Used only if the library has no spec yet (e.g. the material agent failed): a plain,
-    lightly patterned fill in a colour derived from the name."""
+    """Used only if the library has no spec yet (e.g. the material agent failed)."""
     return MaterialSpec(
         base_color=base_color(name),
         accent_color=shade(base_color(name), 1.4),
@@ -61,10 +94,10 @@ def fallback_material(name: str) -> MaterialSpec:
         liquid=False,
         rank=4,
         boundary="lip",
-        ops=[
-            PatternOp(op="patches", tone="light", scale=7, amount=0.3, angle=0, pixels=[]),
-            PatternOp(op="patches", tone="dark", scale=9, amount=0.25, angle=0, pixels=[]),
-        ],
+        block_style="bevel",
+        height=1,
+        height_ops=[],
+        ops=[PatternOp(op="patches", tone="light", scale=20, amount=0.35, angle=0, pixels=[])],
         scatter=[],
     )
 
@@ -92,8 +125,7 @@ def value_noise(wx: np.ndarray, wy: np.ndarray, cell: float, seed: float) -> np.
 
 
 def voronoi(wx: np.ndarray, wy: np.ndarray, cell: float, seed: float):
-    """(d1, d2, cell_rand, dx, dy): nearest/second-nearest site distances in px, a per-cell random
-    value, and the offset from the nearest site (for per-cell bevels)."""
+    """(d1, d2, cell_rand, dx, dy) for the nearest voronoi site in world space."""
     gx, gy = wx / cell, wy / cell
     ix, iy = np.floor(gx), np.floor(gy)
     d1 = np.full(wx.shape, 1e9)
@@ -119,85 +151,182 @@ def voronoi(wx: np.ndarray, wy: np.ndarray, cell: float, seed: float):
 
 @dataclass
 class Ctx:
-    P: int
-    s: float
-    wx: np.ndarray
+    C: int
+    B: int
+    wx: np.ndarray  # pixel-centre world coords
     wy: np.ndarray
-    wx0: float
-    wy0: float
+    bcx: np.ndarray  # world coords of the centre of each pixel's block
+    bcy: np.ndarray
+    lx: np.ndarray  # pixel position inside its block (0..B-1)
+    ly: np.ndarray
+    ox: int
+    oy: int
+
+
+def _ctx(canvas: TileCanvas, margin: int = 0) -> Ctx:
+    """Pixel context for the canvas grown by `margin` world pixels on every side."""
+    B = block_size(canvas.P)
+    ox, oy = canvas.origin[0] - margin, canvas.origin[1] - margin
+    C = canvas.C + 2 * margin
+    idx = np.arange(C) + 0.5
+    wx, wy = np.meshgrid(ox + idx, oy + idx)
+    px, py = np.floor(wx), np.floor(wy)  # integer world pixel indices
+    bx, by = np.floor(px / B), np.floor(py / B)
+    return Ctx(
+        C=C,
+        B=B,
+        wx=wx,
+        wy=wy,
+        bcx=(bx + 0.5) * B,
+        bcy=(by + 0.5) * B,
+        lx=(px - bx * B).astype(np.int32),
+        ly=(py - by * B).astype(np.int32),
+        ox=ox,
+        oy=oy,
+    )
 
 
 def grid_points(ctx: Ctx, cell: float, density: float, seed: float, jitter: float = 0.8):
-    """World-space jittered grid points inside this canvas -> [(col, row)]."""
+    """World-space jittered grid points in/near this canvas -> [(col, row)] canvas pixels."""
     out = []
-    x_min, x_max = ctx.wx0 - ctx.s - 3, ctx.wx0 + ctx.s + 3
-    y_min, y_max = ctx.wy0 - ctx.s - 3, ctx.wy0 + ctx.s + 3
-    for cy in range(math.floor(y_min / cell), math.floor(y_max / cell) + 1):
-        for cx in range(math.floor(x_min / cell), math.floor(x_max / cell) + 1):
+    x0, x1 = ctx.ox - 3, ctx.ox + ctx.C + 3
+    y0, y1 = ctx.oy - 3, ctx.oy + ctx.C + 3
+    for cy in range(math.floor(y0 / cell), math.floor(y1 / cell) + 1):
+        for cx in range(math.floor(x0 / cell), math.floor(x1 / cell) + 1):
             if float(_hash(cx, cy, seed + 9.3)) > density:
                 continue
             px = (cx + 0.5 + (float(_hash(cx, cy, seed)) - 0.5) * jitter) * cell
             py = (cy + 0.5 + (float(_hash(cx, cy, seed + 1.1)) - 0.5) * jitter) * cell
-            col = int(math.floor(px - ctx.wx0 + ctx.s))
-            row = int(math.floor(py - ctx.wy0 + ctx.s))
-            if -3 <= col < ctx.P + 3 and -3 <= row < ctx.P + 3:
-                out.append((col, row))
+            out.append((int(math.floor(px)) - ctx.ox, int(math.floor(py)) - ctx.oy))
     return out
 
 
-# ----------------------------------------------------------------------------- op interpreter
+# ----------------------------------------------------------------------------- material painting
+
+
+TONES = list(RAMP_FACTORS)
 
 
 def paint_material(img: np.ndarray, m: np.ndarray, ctx: Ctx, spec: MaterialSpec, R: Ramp, name: str) -> None:
     img[m] = R[spec.base_tone]
+    # engine-level texture so no block is a flat colour: 2px clusters one tone down/up (solids),
+    # short horizontal glints (liquids). World-aligned, so it continues across tiles.
+    t = TONES.index(spec.base_tone)
+    down, up = R[TONES[max(0, t - 1)]], R[TONES[min(len(TONES) - 1, t + 1)]]
+    if spec.liquid:
+        cx, cy = np.floor(ctx.wx / 7), np.floor(ctx.wy / 4)
+        lx, ly = np.floor(ctx.wx) - cx * 7, np.floor(ctx.wy) - cy * 4
+        glint = (_hash(cx, cy, _seed(name, 998)) < 0.22) & (ly == 1) & (lx >= 2) & (lx <= 4)
+        img[m & glint] = up
+    else:
+        g = _hash(np.floor(ctx.wx / 2), np.floor(ctx.wy / 2), _seed(name, 999))
+        img[m & (g < 0.13)] = down
+        img[m & (g > 0.93)] = up
     for i, op in enumerate(spec.ops):
         seed = _seed(name, i)
         color = R[op.tone]
-        if op.op == "patches":
-            n = value_noise(ctx.wx, ctx.wy, op.scale, seed)
+        if op.op == "patches":  # block-level: whole blocks change colour (chunky)
+            n = value_noise(ctx.bcx, ctx.bcy, max(op.scale, ctx.B * 1.5), seed)
             img[m & (n > 1 - op.amount * 0.8)] = color
-        elif op.op == "speckle":
-            h = _hash(np.floor(ctx.wx), np.floor(ctx.wy), seed)
-            img[m & (h < op.amount * 0.5)] = color
+        elif op.op == "cellfill":
+            _, _, cid, _, _ = voronoi(ctx.bcx, ctx.bcy, max(op.scale, ctx.B * 1.5), seed)
+            img[m & (cid < op.amount)] = color
         elif op.op == "stripes":
             a = math.radians(op.angle)
-            warp = value_noise(ctx.wx, ctx.wy, op.scale * 1.5, seed) * 4
-            v = np.sin((ctx.wx * math.cos(a) + ctx.wy * math.sin(a)) * (2 * math.pi / op.scale) + warp)
+            period = max(op.scale, ctx.B * 2)
+            v = np.sin((ctx.bcx * math.cos(a) + ctx.bcy * math.sin(a)) * (2 * math.pi / period))
             img[m & (v > 1 - 2 * op.amount * 0.5)] = color
-        elif op.op == "cells":
+        elif op.op == "speckle":  # pixel-level detail
+            h = _hash(np.floor(ctx.wx), np.floor(ctx.wy), seed)
+            img[m & (h < op.amount * 0.35)] = color
+        elif op.op == "cells":  # pixel-level cracks
             d1, d2, *_ = voronoi(ctx.wx, ctx.wy, op.scale, seed)
-            img[m & (d2 - d1 < 0.4 + op.amount * 1.6)] = color
-        elif op.op == "cellfill":
-            d1, d2, cid, *_ = voronoi(ctx.wx, ctx.wy, op.scale, seed)
-            img[m & (cid < op.amount) & (d2 - d1 > 1.0)] = color
-        elif op.op == "bevel":
-            j = _cells_index(spec, i)
-            scale = spec.ops[j].scale if j != i else op.scale
-            _, _, _, dx, dy = voronoi(ctx.wx, ctx.wy, scale, _seed(name, j))
-            k = scale * (0.55 - 0.3 * op.amount)
+            img[m & (d2 - d1 < 0.4 + op.amount * 1.2)] = color
+        elif op.op == "bevel":  # per-voronoi-stone bevel (cobbles inside blocks)
+            _, _, _, dx, dy = voronoi(ctx.wx, ctx.wy, op.scale, seed)
+            k = op.scale * (0.55 - 0.3 * op.amount)
             img[m & (dx + dy < -k)] = R["light"]
-            img[m & (dx + dy < -k * 1.5)] = R["hi"]
             img[m & (dx + dy > k * 1.1)] = R["dark"]
         elif op.op == "decals" and op.pixels:
-            P = ctx.P
+            C = ctx.C
             for col, row in grid_points(ctx, op.scale, op.amount, seed):
-                # Centres just outside the canvas still stamp their visible part (material taken
-                # from the nearest canvas pixel), so decals straddling an edge appear on both tiles.
-                if not m[min(P - 1, max(0, row)), min(P - 1, max(0, col))]:
+                if not m[min(C - 1, max(0, row)), min(C - 1, max(0, col))]:
                     continue
                 for px in op.pixels:
                     c, r = col + px.dx, row + px.dy
-                    if 0 <= c < P and 0 <= r < P and m[r, c]:
+                    if 0 <= c < C and 0 <= r < C and m[r, c]:
                         img[r, c] = R[px.tone]
 
 
-def _cells_index(spec: MaterialSpec, i: int) -> int:
-    """A bevel shares its voronoi layout with the nearest preceding 'cells' op, so stones line up
-    with their mortar."""
-    for j in range(i - 1, -1, -1):
-        if spec.ops[j].op in ("cells", "cellfill"):
-            return j
-    return i
+def _shift(arr: np.ndarray, dy: int, dx: int) -> np.ndarray:
+    """arr value at (row + dy, col + dx), edge-clamped."""
+    H, W = arr.shape
+    p = np.pad(arr, 1, mode="edge")
+    return p[1 + dy : 1 + dy + H, 1 + dx : 1 + dx + W]
+
+
+def frame_blocks(img: np.ndarray, mat: np.ndarray, heights: np.ndarray, ctx: Ctx, specs, ramps) -> None:
+    """Terraria-style framing: blocks of the same material and level MERGE into one surface; a
+    block's frame (bevel light/shade, or outline) is drawn only on faces exposed to a different
+    material or level."""
+    B = ctx.B
+    key = mat.astype(np.int32) * 64 + heights.astype(np.int32)
+    up = (ctx.ly == 0) & (_shift(key, -1, 0) != key)
+    left = (ctx.lx == 0) & (_shift(key, 0, -1) != key)
+    down = (ctx.ly == B - 1) & (_shift(key, 1, 0) != key)
+    right = (ctx.lx == B - 1) & (_shift(key, 0, 1) != key)
+    for k, spec in enumerate(specs):
+        m = mat == k
+        if spec.liquid or spec.block_style == "flat" or not m.any():
+            continue
+        if spec.block_style == "bevel":
+            lit, shade_ = m & (up | left), m & (down | right)
+            img[lit] = np.minimum(255, img[lit] * 1.18 + 10)
+            img[shade_] = img[shade_] * 0.72
+        else:  # outline
+            img[m & (up | left | down | right)] = ramps[k]["outline"]
+
+
+def paint_cliffs(img: np.ndarray, mat: np.ndarray, heights: np.ndarray, ctx: Ctx, ramps) -> None:
+    """3/4-view relief: below every rise (seen from the south) its cliff face is drawn, 2px per
+    level, following the plateau's organic contour, with a dark foot and a soft shadow."""
+    H, W = mat.shape
+    dark = np.stack([r["dark"] for r in ramps])
+    outline = np.stack([r["outline"] for r in ramps])
+    best = np.zeros((H, W), np.int32)  # rows into the wall (1-based) of the tallest face over this pixel
+    src = np.zeros((H, W), np.int64)
+    rows_of = np.zeros((H, W), np.int32)
+    for dy in range(1, 2 * MAX_LEVEL + 2):
+        above_h = np.pad(heights, ((dy, 0), (0, 0)), mode="edge")[:H]
+        above_m = np.pad(mat, ((dy, 0), (0, 0)), mode="edge")[:H]
+        rows = (2 * (above_h - heights) + 1).astype(np.int32)  # wall height below that rise
+        hit = (above_h > heights) & (rows >= dy) & (best == 0)
+        best[hit], src[hit], rows_of[hit] = dy, above_m[hit], rows[hit]
+    wall = best > 0
+    face = dark[src]
+    face = np.where((np.floor(ctx.wx) % 4 == 0)[..., None], face * 0.84, face)
+    face = np.where((best == 1)[..., None], np.minimum(255, face * 1.15), face)
+    face = np.where((best == rows_of)[..., None], outline[src], face)
+    img[wall] = face[wall]
+    below = np.pad(wall, ((1, 0), (0, 0)))[:H] & ~wall
+    img[below] = img[below] * 0.72
+
+
+def material_heights(ctx: Ctx, spec: MaterialSpec, name: str) -> np.ndarray:
+    h = np.full(ctx.wx.shape, float(spec.height))
+    for i, op in enumerate(spec.height_ops):
+        seed = _seed(name, 100 + i)
+        scale = max(op.scale, ctx.B * 2)
+        if op.op == "patches":
+            sel = value_noise(ctx.bcx, ctx.bcy, scale, seed) > 1 - op.amount * 0.8
+        elif op.op == "cellfill":
+            sel = voronoi(ctx.bcx, ctx.bcy, scale, seed)[2] < op.amount
+        elif op.op == "stripes":
+            sel = np.sin((ctx.bcx + ctx.bcy * 0.6) * (2 * math.pi / scale)) > 1 - 2 * op.amount * 0.5
+        else:  # speckle, per block
+            sel = _hash(np.floor(ctx.bcx), np.floor(ctx.bcy), seed) < op.amount * 0.4
+        h = np.where(sel, h + op.delta, h)
+    return h
 
 
 # ----------------------------------------------------------------------------- main entry
@@ -206,19 +335,19 @@ def _cells_index(spec: MaterialSpec, i: int) -> int:
 def render_ground(
     *,
     tile_px: int,
-    palette: list[str],
     biome: str,
     edges: list[dict],
     coord: tuple[int, int],
     materials: dict[str, MaterialSpec | dict] | None = None,
-) -> np.ndarray:
-    """RGB uint8 (P, P, 3) ground texture for the full square canvas (the caller applies the hex mask)."""
-    P = tile_px
-    s = P / 2.0
-    c = (np.arange(P) + 0.5) - s
-    x, y = np.meshgrid(c, c)
-    wx0, wy0 = Hex(*coord).to_pixel(s)
-    ctx = Ctx(P=P, s=s, wx=x + wx0, wy=y + wy0, wx0=wx0, wy0=wy0)
+    palette: list[str] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """(RGB uint8 (C, C, 3), relief levels uint8 (C, C)) for the tile's canvas on the world grid."""
+    canvas = TileCanvas(Hex(*coord), tile_px)
+    U = unit(tile_px)
+    margin = 2 * MAX_LEVEL + 4  # so contours/cliffs at the rim see what lies beyond it
+    ctx = _ctx(canvas, margin)
+    s = canvas.s
+    cx, cy = canvas.center
     apothem = s * SQRT3 / 2
     lib = {
         k: (v if isinstance(v, MaterialSpec) else MaterialSpec.model_validate(v))
@@ -228,15 +357,25 @@ def render_ground(
     def spec_of(name: str) -> MaterialSpec:
         return lib.get(name) or fallback_material(name)
 
-    # --- material map
+    # --- material per BLOCK (evaluated at block centres, relative to this hex)
+    # domain warp: band borders (and corners where two edge terrains meet) become organic, not
+    # straight bisectors. Evaluated in world space, so neighbours agree near shared edges.
+    wx_ = value_noise(ctx.bcx, ctx.bcy, U * 1.6, 3.1) - 0.5
+    wy_ = value_noise(ctx.bcx, ctx.bcy, U * 1.6, 5.3) - 0.5
+    bx, by = ctx.bcx - cx + wx_ * U * 1.2, ctx.bcy - cy + wy_ * U * 1.2
     dots = np.stack(
-        [(x * math.cos(math.radians(a)) + y * math.sin(math.radians(a))) / apothem for a in DIRECTION_ANGLES],
+        [
+            (bx * math.cos(math.radians(a)) + by * math.sin(math.radians(a))) / apothem
+            for a in DIRECTION_ANGLES
+        ],
         axis=-1,
     )
     nearest_edge = dots.argmax(-1)
     d = dots.max(-1)
-    wobble = value_noise(ctx.wx, ctx.wy, 6.0, 7.0) * 2 - 1
-    band = d > 0.56 + 0.16 * wobble
+    wobble = (
+        value_noise(ctx.bcx, ctx.bcy, U * 2.2, 7.0) * 0.7 + value_noise(ctx.bcx, ctx.bcy, U, 8.0) * 0.3
+    ) * 2 - 1
+    band = d > 0.5 + 0.14 * wobble  # stays well inside the edge, so neighbours agree near it
     names: list[str] = [biome]
     for e in edges:
         if e["terrain"] not in names:
@@ -244,40 +383,44 @@ def render_ground(
     edge_idx = np.array([names.index(e["terrain"]) for e in edges])
     mat = np.where(band, edge_idx[nearest_edge], 0)
 
-    # --- connectors: curved paths from the center to each connector edge's midpoint
+    # --- connectors: blocky paths from the centre to each connector edge's midpoint
     conns = [(i, cn) for i, e in enumerate(edges) for cn in e.get("connectors", [])]
     for cname in sorted({cn for _, cn in conns}):
         idx = len(names)
         names.append(cname)
-        width = max(1.6, P / (9.0 if spec_of(cname).liquid else 13.0))
-        dist = np.full((P, P), 1e9)
+        width = U * (0.75 if spec_of(cname).liquid else 0.55)
+        dist = np.full(bx.shape, 1e9)
         mine = [i for i, cn in conns if cn == cname]
         for i in mine:
             ang = math.radians(DIRECTION_ANGLES[i])
             mx, my = math.cos(ang) * apothem, math.sin(ang) * apothem
             nx, ny = -math.sin(ang), math.cos(ang)
-            amp = width * 0.9 * (1 if (coord[0] * 7 + coord[1] * 13 + i) % 2 else -1)
-            for t in np.linspace(0, 1, 28):
-                # zero offset AND zero slope at the edge: both tiles cross the shared edge identically
-                off = amp * 1.6 * math.sin(math.pi * t) * (1 - t)
-                dist = np.minimum(dist, np.hypot(x - (mx * t + nx * off), y - (my * t + ny * off)))
-        if len(mine) == 1:  # dead end: pond / plaza
-            dist = np.minimum(dist, np.hypot(x, y) - width * 0.8)
+            amp = U * 0.9 * (1 if (coord[0] * 7 + coord[1] * 13 + i) % 2 else -1)
+            for t in np.linspace(0, 1, 32):
+                off = amp * 1.6 * math.sin(math.pi * t) * (1 - t)  # zero offset & slope at the edge
+                dist = np.minimum(dist, np.hypot(bx - (mx * t + nx * off), by - (my * t + ny * off)))
+        if len(mine) == 1:
+            dist = np.minimum(dist, np.hypot(bx, by) - width)
         mat = np.where(dist <= width, idx, mat)
 
     specs = [spec_of(n) for n in names]
-    ramps = [ramp_for(sp, palette) for sp in specs]
-    img = np.zeros((P, P, 3), dtype=np.float32)
+    ramps = [ramp_for(sp) for sp in specs]
+    img = np.zeros((ctx.C, ctx.C, 3), dtype=np.float32)
+    heights = np.zeros((ctx.C, ctx.C), dtype=np.float32)
     for k, name in enumerate(names):
         m = mat == k
         if m.any():
             paint_material(img, m, ctx, specs[k], ramps[k], name)
+            heights[m] = material_heights(ctx, specs[k], name)[m]
+    heights = np.clip(np.rint(heights), 0, MAX_LEVEL)
+    frame_blocks(img, mat, heights, ctx, specs, ramps)
 
-    # --- crisp boundaries between materials
+    # --- crisp boundaries between materials (they follow the block grid)
     out = img.copy()
+    C = ctx.C
     for dy_, dx_ in ((0, 1), (0, -1), (1, 0), (-1, 0)):
         nb = np.roll(np.roll(mat, dy_, axis=0), dx_, axis=1)
-        valid = np.ones((P, P), bool)
+        valid = np.ones((C, C), bool)
         if dy_:
             valid[0 if dy_ == 1 else -1, :] = False
         if dx_:
@@ -295,25 +438,26 @@ def render_ground(
                 out[r_, c_] = R["dark"]
             elif own.boundary == "lip" and own.rank > other.rank:
                 out[r_, c_] = R["dark"]
-    return np.clip(out, 0, 255).astype(np.uint8)
+
+    paint_cliffs(out, mat, heights, ctx, ramps)
+    crop = slice(margin, margin + canvas.C)
+    return np.clip(out[crop, crop], 0, 255).astype(np.uint8), heights[crop, crop].astype(np.uint8)
 
 
 def material_preview_png(
     name: str, spec: MaterialSpec, tile_px: int, contrast: MaterialSpec | None = None
 ) -> bytes:
-    """What the material artist sees: a small patch of this material (4 tiles, showing seamless
-    tiling) plus one tile bordering a contrasting material (showing the boundary treatment)."""
+    """What the material artist sees: a patch of this material (4 tiles, showing seamless tiling
+    and relief shading) plus one tile bordering a contrasting material (the boundary treatment)."""
     import io
 
     from hexworld.art.composite import render_region
-    from hexworld.art.pixelize import hex_mask
 
     other = contrast or fallback_material("neutral_stone")
     mats = {name: spec, "__contrast": other}
-    tiles: dict[Hex, np.ndarray] = {}
-    mask = hex_mask(tile_px)
     same = [{"terrain": name, "connectors": []}] * 6
     mixed = [{"terrain": name if i in (0, 1, 5) else "__contrast", "connectors": []} for i in range(6)]
+    tiles: dict[Hex, np.ndarray] = {}
     for h, edges in (
         (Hex(0, 0), same),
         (Hex(1, 0), same),
@@ -321,14 +465,14 @@ def material_preview_png(
         (Hex(1, -1), same),
         (Hex(2, 0), mixed),
     ):
-        g = render_ground(
-            tile_px=tile_px, palette=[], biome=name, edges=edges, coord=(h.q, h.r), materials=mats
-        )
-        rgba = np.zeros((tile_px, tile_px, 4), np.uint8)
-        rgba[mask, :3] = g[mask]
-        rgba[mask, 3] = 255
+        rgb, _ = render_ground(tile_px=tile_px, biome=name, edges=edges, coord=(h.q, h.r), materials=mats)
+        canvas = TileCanvas(h, tile_px)
+        rgba = np.zeros((canvas.C, canvas.C, 4), np.uint8)
+        m = canvas.mask()
+        rgba[m, :3] = rgb[m]
+        rgba[m, 3] = 255
         tiles[h] = rgba
-    img = render_region(tiles, tile_px=tile_px, scale=5)
+    img = render_region(tiles, tile_px=tile_px, scale=3)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()

@@ -37,14 +37,14 @@ function WorldFramer() {
     if (!worldId) return;
     const keys = Object.keys(useStore.getState().tiles).filter((k) => useStore.getState().tiles[k].status === "accepted");
     if (!keys.length) {
-      rig.setGoal(new THREE.Vector3(0, 0, 0), 24);
+      rig.setGoal(new THREE.Vector3(0, 0, 0), 14);
       return;
     }
     const pts = keys.map((k) => hexToWorld(parseKey(k).q, parseKey(k).r));
     const cx = pts.reduce((a, p) => a + p[0], 0) / pts.length;
     const cz = pts.reduce((a, p) => a + p[1], 0) / pts.length;
     const rad = Math.max(...pts.map((p) => Math.hypot(p[0] - cx, p[1] - cz)));
-    rig.setGoal(new THREE.Vector3(cx, 0, cz), THREE.MathUtils.clamp(12 + rad * 2.2, 12, 80));
+    rig.setGoal(new THREE.Vector3(cx, 0, cz), THREE.MathUtils.clamp(8 + rad * 1.5, 8, 40));
   }, [worldId]);
   return null;
 }

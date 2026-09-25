@@ -101,7 +101,10 @@ def shade(c: str, factor: float) -> str:
     """Lightness scale with a slight hue shift (warm highlights, cool shadows) for livelier ramps."""
     r, g, b = hex_to_rgb(c)
     h, lum, s = colorsys.rgb_to_hls(r / 255, g / 255, b / 255)
-    lum = max(0.0, min(1.0, lum * factor))
+    if factor <= 1:
+        lum = max(0.0, lum * factor)
+    else:  # approach white without reaching it, so pale materials keep distinct highlight tones
+        lum = min(0.95, lum + (1 - lum) * min(1.0, (factor - 1) * 0.9))
     h = (h + (0.015 if factor < 1 else -0.01) * abs(1 - factor)) % 1.0
     s = max(0.0, min(1.0, s * (1.05 if factor < 1 else 0.95)))
     r2, g2, b2 = colorsys.hls_to_rgb(h, lum, s)

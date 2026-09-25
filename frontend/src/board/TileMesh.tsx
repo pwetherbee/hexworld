@@ -3,7 +3,7 @@ import { memo, useEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
 import type { TileLayer } from "../api/types.gen";
 import { useStore } from "../store";
-import { SHARED, hexOutlinePoints } from "./geometry";
+import { SHARED, hexOutlinePoints, tileFaceGeometry } from "./geometry";
 import { Spring, hexDistance, hexToWorld } from "./hexMath";
 import { usePixelTexture } from "./textures";
 
@@ -17,9 +17,12 @@ const COPY_COLORS = { shallow: "#a78bfa", deep: "#60a5fa" } as const;
 const RING_GEO = new THREE.RingGeometry(0.9, 1.0, 6, 1, Math.PI / 6);
 const SCAN_GEO = new THREE.BufferGeometry().setFromPoints(hexOutlinePoints(0.8, 0));
 const SEL_GEO = new THREE.BufferGeometry().setFromPoints(hexOutlinePoints(1.0, 0));
+const NO_RAYCAST = () => undefined;
 const SPRITE_GEO = new THREE.PlaneGeometry(1, 1).translate(0, 0.5, 0); // anchored at the bottom
 
-export const reliefHeight = (relief: number) => 0.12 + Math.max(0, Math.min(3, relief)) * 0.13;
+// All accepted tiles share one height: relief lives in the art (painted cliffs + heightmap layer),
+// so neighbouring faces meet flush and the ground reads as one continuous surface.
+export const TILE_HEIGHT = 0.16;
 
 function biomeTint(biome: string | null | undefined): string {
   if (!biome) return "#94a3b8";
@@ -62,7 +65,12 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
   const scale = useRef(new Spring(1));
 
   const [x, z] = hexToWorld(tile.q, tile.r);
-  const height = accepted ? reliefHeight(tile.relief ?? 1) : 0.08;
+  const height = accepted ? TILE_HEIGHT : 0.08;
+  const texW = (tex?.image as { width?: number } | undefined)?.width;
+  const faceGeo = useMemo(
+    () => (texW && texW > 8 ? tileFaceGeometry(tile.q, tile.r, texW - 3) : SHARED.face),
+    [tile.q, tile.r, texW],
+  );
   const isCopy = accepted && !!tile.copy_mode;
   const planDelay = origin ? hexDistance(origin, tile) * PLAN_STAGGER_MS : 0;
   const ringColor = useMemo(
@@ -179,7 +187,15 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
       <mesh geometry={SHARED.emptyFace} position={[x, 0.003, z]} rotation={[0, 0, 0]}>
         <meshBasicMaterial ref={shadowMat} color="#000000" transparent opacity={0} depthWrite={false} />
       </mesh>
-      <group ref={group} position={[x, 0, z]} onClick={onClick}>
+      <group
+        ref={group}
+        position={[x, 0, z]}
+        onClick={onClick}
+        onPointerMove={(e) => {
+          e.stopPropagation(); // the ground-plane grid underneath must not steal hover
+          if (useStore.getState().hover !== tileKey) useStore.getState().setHover(tileKey);
+        }}
+      >
         <mesh ref={body} geometry={SHARED.prism} position={[0, height / 2, 0]} scale={[1, height, 1]}>
           <meshStandardMaterial
             ref={bodyMat}
@@ -192,7 +208,7 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
           />
         </mesh>
         {tex && (
-          <mesh geometry={SHARED.face} position={[0, height + 0.002, 0]}>
+          <mesh geometry={faceGeo} position={[0, height + 0.002, 0]}>
             {/* unlit: the pixel art shows its exact colours */}
             <meshBasicMaterial map={tex} transparent={!accepted} opacity={accepted ? 1 : 0.85} alphaTest={0.5} />
           </mesh>
@@ -295,7 +311,8 @@ function SpriteBillboard({
   if (!tex) return null;
   return (
     <group ref={grp} position={[layer.x, top, layer.y]}>
-      <mesh ref={mesh} geometry={SPRITE_GEO} scale={[0.001, 0.001, 1]}>
+      {/* not pickable: a sprite overlaps the tile behind it on screen and would steal its clicks */}
+      <mesh ref={mesh} geometry={SPRITE_GEO} scale={[0.001, 0.001, 1]} raycast={NO_RAYCAST}>
         <meshBasicMaterial ref={mat} map={tex} transparent alphaTest={0.5} side={THREE.DoubleSide} />
       </mesh>
     </group>

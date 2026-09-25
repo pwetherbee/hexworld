@@ -10,6 +10,7 @@ from collections.abc import Iterable
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from hexworld.art.grid import TileCanvas
 from hexworld.hex import SQRT3, Hex
 
 EMPTY_FILL = (24, 26, 34, 255)
@@ -41,7 +42,8 @@ def render_region(
     center: Hex | None = None,
     extent_px: int | None = None,
 ) -> Image.Image:
-    """Draw tiles (RGBA arrays in canonical format) at their true hex positions.
+    """Draw tile canvases (world-grid RGBA, see art/grid.py) at their exact world pixel origins,
+    so the result is a pixel-perfect mosaic of the shared world grid.
 
     - `slots`: hexes drawn as dark empty hexes when they have no tile (holes / target slot)
     - `labels`: candidate hexes to outline in magenta with a number
@@ -53,12 +55,12 @@ def render_region(
     hexes = set(tiles) | set(slots) | set(labels)
     if center is not None and extent_px is not None:
         cx0, cy0 = center.to_pixel(s)
-        x0, y0 = cx0 - extent_px / 2, cy0 - extent_px / 2
+        x0, y0 = math.floor(cx0 - extent_px / 2), math.floor(cy0 - extent_px / 2)
         w = h = extent_px
     else:
         xs, ys = zip(*(hx.to_pixel(s) for hx in hexes), strict=True) if hexes else ((0.0,), (0.0,))
         pad = tile_px * 0.6
-        x0, y0 = min(xs) - pad, min(ys) - pad
+        x0, y0 = math.floor(min(xs) - pad), math.floor(min(ys) - pad)
         w, h = int(max(xs) - x0 + pad), int(max(ys) - y0 + pad)
 
     canvas = Image.new("RGBA", (int(w), int(h)), BG)
@@ -68,9 +70,8 @@ def render_region(
             cx, cy = hx.to_pixel(s)
             draw.polygon(hex_polygon(cx - x0, cy - y0, s - 0.5), fill=EMPTY_FILL)
     for hx, arr in sorted(tiles.items(), key=lambda kv: kv[0].r):
-        cx, cy = hx.to_pixel(s)
-        img = Image.fromarray(arr, "RGBA")
-        canvas.alpha_composite(img, (int(round(cx - x0 - s)), int(round(cy - y0 - s))))
+        ox, oy = TileCanvas(hx, tile_px).origin
+        canvas.alpha_composite(Image.fromarray(arr, "RGBA"), (ox - x0, oy - y0))
 
     if scale != 1:
         canvas = canvas.resize((canvas.width * scale, canvas.height * scale), Image.Resampling.NEAREST)

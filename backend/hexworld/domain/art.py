@@ -106,6 +106,23 @@ class PatternOp(BaseModel):
         return self
 
 
+class HeightOp(BaseModel):
+    """Relief pattern, evaluated per BLOCK in world space: selected blocks are raised/lowered by
+    `delta` levels (one level = one pixel-cube high)."""
+
+    op: Literal["patches", "cellfill", "stripes", "speckle"]
+    scale: float = Field(description="Feature size in pixels (8-48 for block-scale relief).")
+    amount: float = Field(description="0-1 coverage/density.")
+    delta: int = Field(description="-2..+4 levels added to selected blocks.")
+
+    @model_validator(mode="after")
+    def _c(self) -> HeightOp:
+        self.scale = _clamp(self.scale, 4, 64)
+        self.amount = _clamp(self.amount, 0, 1)
+        self.delta = int(_clamp(self.delta, -2, 4))
+        return self
+
+
 class ScatterSpec(BaseModel):
     kind: str = Field(description="Sprite kind placed around this material, e.g. 'oak tree', 'boulder'.")
     count: int = Field(description="Sprites per tile of this material (0-8).")
@@ -127,6 +144,17 @@ class MaterialSpec(BaseModel):
     boundary: Literal["lip", "foam", "glow", "none"] = Field(
         description="How this material's own border pixels look: foam (water), glow (lava), lip, none."
     )
+    block_style: Literal["bevel", "outline", "flat"] = Field(
+        default="bevel",
+        description="How each 8px block is drawn: 'bevel' (lit top-left, shaded bottom-right; stone, dirt, "
+        "grass, obsidian), 'outline' (dark 1px frame: bricks, planks, tiles), 'flat' (liquids, snow, sand).",
+    )
+    height: int = Field(
+        default=1, description="Base relief level 0-4 (liquids 0, plains 1, hills 2, rock 3+)."
+    )
+    height_ops: list[HeightOp] = Field(
+        default_factory=list, description="Relief patterns (<= 3), e.g. ridges."
+    )
     ops: list[PatternOp] = Field(description="Pattern layers in paint order (<= 8).")
     scatter: list[ScatterSpec] = Field(description="Ambient sprites for tiles of this material (<= 2 kinds).")
 
@@ -138,6 +166,10 @@ class MaterialSpec(BaseModel):
     @model_validator(mode="after")
     def _c(self) -> MaterialSpec:
         self.rank = int(_clamp(self.rank, 0, 9))
+        self.height = int(_clamp(self.height, 0, 4))
+        self.height_ops = self.height_ops[:3]
+        if self.liquid:
+            self.height, self.height_ops = 0, []
         self.ops = self.ops[:8]
         self.scatter = self.scatter[:2]
         return self
@@ -148,7 +180,8 @@ class MaterialSpec(BaseModel):
 
 class SpriteEntry(BaseModel):
     kind: str
-    program: SpriteProgram
+    program: SpriteProgram | None = None  # drawn with the DSL
+    prompt: str | None = None  # or painted by the image model from this art direction
     asset_id: str
     px_w: int
     px_h: int

@@ -17,6 +17,7 @@ import numpy as np
 from PIL import Image
 
 from hexworld.agents.themes import hex_to_rgb, nearest_palette, shade
+from hexworld.art.grid import TileCanvas
 from hexworld.art.procedural import _hash
 from hexworld.domain.art import ScatterSpec, ShapeOp, SpriteProgram
 
@@ -150,12 +151,15 @@ def scatter_positions(scatter: list[ScatterSpec], coord: tuple[int, int], varian
     return out
 
 
-def flatten(ground: np.ndarray, placed: list[Placed], tile_px: int) -> np.ndarray:
+def flatten(ground: np.ndarray, placed: list[Placed], canvas: TileCanvas) -> np.ndarray:
     """Top-down preview: paste each sprite's first frame bottom-centred at its position (back to
-    front). Used for thumbnails, the review composite and the style anchor."""
+    front), clipped to the hex. Used for thumbnails, the review contact sheet and the style anchor."""
     out = ground.copy()
-    s = tile_px / 2.0
-    mask = ground[..., 3] > 0
+    s = canvas.s
+    cx, cy = canvas.center
+    ox, oy = canvas.origin
+    C = canvas.C
+    mask = canvas.mask()
     for p in sorted(placed, key=lambda p: p.y):
         fr = p.art.frames[0]
         if abs(p.scale - 1) > 0.15:
@@ -166,10 +170,11 @@ def flatten(ground: np.ndarray, placed: list[Placed], tile_px: int) -> np.ndarra
                 )
             )
         h, w = fr.shape[:2]
-        x0, y0 = int(round(s + p.x * s)) - w // 2, int(round(s + p.y * s)) - h
+        x0 = int(round(cx + p.x * s - ox)) - w // 2
+        y0 = int(round(cy + p.y * s - oy)) - h
         ys, xs = np.nonzero(fr[..., 3] > 0)
         X, Y = xs + x0, ys + y0
-        ok = (X >= 0) & (X < tile_px) & (Y >= 0) & (Y < tile_px)
+        ok = (X >= 0) & (X < C) & (Y >= 0) & (Y < C)
         X, Y, ys, xs = X[ok], Y[ok], ys[ok], xs[ok]
         keep = mask[Y, X]
         out[Y[keep], X[keep]] = fr[ys[keep], xs[keep]]

@@ -23,9 +23,8 @@ async def test_super_duplicates_filler_tiles_shallow_and_deep(make_runtime):
         assert src.status == TileStatus.accepted and src.copy_of is None  # always a root prototype
         assert c.biome == src.biome
         # procedural ground: the copy is re-rendered in place (same design, own pixels), same props
-        assert c.ground_asset_id and [x.asset_id for x in c.layers[1:]] == [
-            x.asset_id for x in src.layers[1:]
-        ]
+        sprites = lambda t: [x.asset_id for x in t.layers if x.kind == "sprite"]  # noqa: E731
+        assert c.ground_asset_id and sprites(c) == sprites(src)
         assert c.attempts == 0  # no LLM or image work was spent on it
         for i in range(6):  # a copy still honors the continuity contract
             n = tiles.get(c.hex.neighbor(i))

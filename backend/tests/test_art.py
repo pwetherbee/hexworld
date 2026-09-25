@@ -1,92 +1,115 @@
 import io
-import math
 
 import numpy as np
-import pytest
 from PIL import Image
 
-from hexworld.agents.themes import palette_for
-from hexworld.art.backend import ComfyUIBackend, ImageRequest, ProceduralStubBackend, _substitute
+from hexworld.art.backend import ComfyUIBackend, ImageRequest, ProceduralBackend, _substitute
 from hexworld.art.composite import context_canvas, crop_target, render_region
-from hexworld.art.pixelize import hex_mask, load_tile, pixelize, seam_delta
+from hexworld.art.grid import TileCanvas, seam_delta
+from hexworld.art.paint import pixelize_sprite
+from hexworld.art.pixelize import crisp_tile, load_tile
+from hexworld.art.procedural import fallback_material, render_ground
+from hexworld.domain.art import HeightOp
 from hexworld.hex import Hex
 
-PALETTE = palette_for(["water", "sand", "grass", "forest", "rock"], ["road", "river"])
+P = 64
 
 
-def test_hex_mask_area():
-    m = hex_mask(48)
-    s = 24
-    expected = (3 * math.sqrt(3) / 2 * s * s) / (48 * 48)
-    assert abs(m.mean() - expected) < 0.02
-    assert m[24, 24] and not m[0, 0] and not m[2, 47]
-
-
-async def _stub_tile(q, r, biome, edges, px=48, seed=1):
+async def _tile(q, r, biome, edges, materials=None):
     req = ImageRequest(
         prompt="",
         negative="",
-        seed=seed,
-        size=px * 4,
+        seed=1,
+        size=512,
         hints={
-            "tile_px": px,
-            "palette": PALETTE,
+            "tile_px": P,
             "biome": biome,
             "coord": (q, r),
-            "features": [],
+            "materials": materials or {},
             "edges": [{"terrain": t, "connectors": c} for t, c in edges],
         },
     )
-    res = await ProceduralStubBackend(latency_s=0).generate(req)
-    return pixelize(res.png, PALETTE, px)
+    res = await ProceduralBackend(latency_s=0).generate(req)
+    return crisp_tile(res.png, TileCanvas(Hex(q, r), P)), res
 
 
-async def test_pixelize_uses_only_palette_colors_and_masks_hex():
-    pix = await _stub_tile(0, 0, "grass", [("grass", [])] * 6)
-    pal = {tuple(int(c[i : i + 2], 16) for i in (1, 3, 5)) for c in PALETTE}
-    opaque = pix.rgba[..., 3] == 255
-    colors = {tuple(int(v) for v in px) for px in pix.rgba[opaque][:, :3]}
-    assert colors <= pal
-    assert not (pix.rgba[..., 3][~hex_mask(48)]).any()
-    assert pix.coverage > 0.97
-    assert pix.distinct_colors >= 3
+def test_canvases_share_one_world_grid():
+    for h in (Hex(0, 0), Hex(1, 0), Hex(-3, 2), Hex(5, -7)):
+        c = TileCanvas(h, P)
+        ox, oy = c.origin
+        cx, cy = c.center
+        assert isinstance(ox, int) and isinstance(oy, int)
+        assert ox <= cx - c.s - 1 and oy <= cy - c.s - 1
+        assert ox + c.C >= cx + c.s + 1 and oy + c.C >= cy + c.s + 1
+        assert abs(c.mask().sum() - 2.598 * c.s**2) < 0.03 * 2.598 * c.s**2
 
 
-async def test_seams_low_when_edges_agree_high_when_not():
-    a = await _stub_tile(0, 0, "grass", [("grass", [])] * 6)
-    b = await _stub_tile(1, 0, "grass", [("grass", [])] * 6, seed=2)  # east neighbor of a
-    c = await _stub_tile(1, 0, "water", [("water", [])] * 6, seed=3)
-    assert seam_delta(a.rgba, 0, b.rgba) < 0.3
-    assert seam_delta(a.rgba, 0, c.rgba) > 0.6
-    # symmetric
-    assert seam_delta(a.rgba, 0, b.rgba) == pytest.approx(seam_delta(b.rgba, 3, a.rgba), abs=0.05)
+def test_neighbours_paint_identical_world_pixels_near_the_shared_edge():
+    edges = [{"terrain": "grass", "connectors": []}] * 6
+    a_rgb, _ = render_ground(tile_px=P, biome="grass", edges=edges, coord=(0, 0))
+    b_rgb, _ = render_ground(tile_px=P, biome="grass", edges=edges, coord=(1, 0))
+    ca, cb = TileCanvas(Hex(0, 0), P), TileCanvas(Hex(1, 0), P)
+    (ax, ay), (bx, by) = ca.origin, cb.origin
+    compared = same = 0
+    for j in range(ca.C):
+        for i in range(ca.C):
+            bi, bj = ax + i - bx, ay + j - by
+            if 0 <= bi < cb.C and 0 <= bj < cb.C and not ca.mask()[j, i] and cb.mask()[bj, bi]:
+                compared += 1
+                same += int((a_rgb[j, i] == b_rgb[bj, bi]).all())
+    assert compared > 20 and same / compared > 0.95
 
 
-async def test_connectors_meet_across_edges():
-    road = [("grass", [])] * 6
-    a_edges = list(road)
-    a_edges[0] = ("grass", ["road"])
-    b_edges = list(road)
-    b_edges[3] = ("grass", ["road"])
-    a = await _stub_tile(0, 0, "grass", a_edges)
-    b = await _stub_tile(1, 0, "grass", b_edges)
-    assert seam_delta(a.rgba, 0, b.rgba) < 0.3
+async def test_crisp_tile_masks_hex_and_seams_are_continuous():
+    a, _ = await _tile(0, 0, "grass", [("grass", [])] * 6)
+    b, _ = await _tile(1, 0, "grass", [("grass", [])] * 6)
+    w, _ = await _tile(1, 0, "water", [("water", [])] * 6)
+    ca, cb = TileCanvas(Hex(0, 0), P), TileCanvas(Hex(1, 0), P)
+    assert not a.rgba[..., 3][~ca.mask()].any() and a.coverage > 0.97
+    assert seam_delta(a.rgba, ca, 0, b.rgba, cb) < 0.2  # same texture continuing (organic patches)
+    assert seam_delta(a.rgba, ca, 0, w.rgba, cb) > 0.4
+    assert abs(seam_delta(a.rgba, ca, 0, b.rgba, cb) - seam_delta(b.rgba, cb, 3, a.rgba, ca)) < 0.05
+
+
+async def test_procedural_ground_exports_block_relief():
+    spec = fallback_material("crags").model_copy(
+        update={"height": 2, "height_ops": [HeightOp(op="patches", scale=16, amount=0.5, delta=2)]}
+    )
+    _, res = await _tile(0, 0, "crags", [("crags", [])] * 6, materials={"crags": spec.model_dump()})
+    h = np.asarray(Image.open(io.BytesIO(res.height_png))) // 40
+    assert h.min() >= 2 and h.max() == 4
+    ox, oy = TileCanvas(Hex(0, 0), P).origin
+    blocks: dict = {}
+    for j in range(h.shape[0]):
+        for i in range(h.shape[1]):
+            blocks.setdefault(((ox + i) // 2, (oy + j) // 2), set()).add(int(h[j, i]))
+    assert all(len(v) == 1 for v in blocks.values())  # relief is constant per 2px art cell
+
+
+def test_pixelize_sprite_crops_scales_and_outlines():
+    img = np.zeros((1024, 1024, 4), np.uint8)
+    img[300:900, 400:600] = (200, 60, 40, 255)
+    buf = io.BytesIO()
+    Image.fromarray(img, "RGBA").save(buf, format="PNG")
+    art = pixelize_sprite(buf.getvalue(), "large")
+    assert art.h == 36 + 2 and art.w <= 32  # target height + 1px outline each side
+    fr = art.frames[0]
+    assert fr[..., 3].any() and (fr[..., 3] == 0).any()
 
 
 async def test_context_canvas_and_crop_roundtrip():
-    a = await _stub_tile(1, 0, "grass", [("grass", [])] * 6)
-    ctx, mask = context_canvas(Hex(0, 0), {Hex(1, 0): a.rgba}, 48, 432)
+    a, _ = await _tile(1, 0, "grass", [("grass", [])] * 6)
+    ctx, mask = context_canvas(Hex(0, 0), {Hex(1, 0): a.rgba}, P, 576)
     ctx_img, mask_img = Image.open(io.BytesIO(ctx)), Image.open(io.BytesIO(mask))
-    assert ctx_img.size == mask_img.size == (432, 432)
+    assert ctx_img.size == mask_img.size == (576, 576)
     m = np.asarray(mask_img)
-    assert m[216, 216] == 255 and m[0, 0] == 0
-    crop = Image.open(io.BytesIO(crop_target(ctx, 48)))
-    assert crop.size == (144, 144)
+    assert m[288, 288] == 255 and m[0, 0] == 0
+    assert Image.open(io.BytesIO(crop_target(ctx, P))).size == (192, 192)
 
 
 def test_render_region_labels():
     img = render_region(
-        {Hex(0, 0): np.zeros((48, 48, 4), np.uint8)}, tile_px=48, labels={Hex(0, 0): 1}, scale=2
+        {Hex(0, 0): np.zeros((P + 3, P + 3, 4), np.uint8)}, tile_px=P, labels={Hex(0, 0): 1}, scale=2
     )
     assert img.width > 0 and img.height > 0
 
@@ -97,15 +120,14 @@ def test_comfy_placeholder_substitution():
     assert out["1"]["inputs"] == {"seed": 42, "text": "a castle b", "image": "x.png"}
 
 
-def test_comfy_workflow_templates_parse(tmp_path):
+def test_comfy_workflow_templates_parse():
     from hexworld.config import REPO_ROOT
 
     backend = ComfyUIBackend("http://127.0.0.1:1", REPO_ROOT / "services" / "comfyui" / "workflows")
     for name in ("txt2img_tile", "neighbor_inpaint"):
         wf = backend._workflow(name)
         assert wf is not None, name
-        flat = str(wf)
-        assert "{{prompt}}" in flat and "{{seed}}" in flat
+        assert "{{prompt}}" in str(wf) and "{{seed}}" in str(wf)
 
 
 def test_load_tile_roundtrip():

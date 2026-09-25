@@ -7,7 +7,8 @@ from typing import Any
 
 import numpy as np
 
-from hexworld.art.pixelize import PixelTile, seam_delta
+from hexworld.art.grid import TileCanvas, seam_delta
+from hexworld.art.pixelize import PixelTile
 from hexworld.hex import DIRECTION_NAMES
 
 
@@ -24,6 +25,7 @@ class CheckResult:
 
 def check_candidate(
     pix: PixelTile,
+    canvas: TileCanvas,
     accepted_neighbors: dict[int, np.ndarray],
     *,
     max_seam_delta: float,
@@ -47,7 +49,7 @@ def check_candidate(
 
     seams: dict[str, float] = {}
     for edge, nb in accepted_neighbors.items():
-        d = seam_delta(pix.rgba, edge, nb)
+        d = seam_delta(pix.rgba, canvas, edge, nb, TileCanvas(canvas.h.neighbor(edge), canvas.P))
         seams[str(edge)] = d
         if d > max_seam_delta:
             res.failures.append(

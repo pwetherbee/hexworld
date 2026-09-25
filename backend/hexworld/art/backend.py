@@ -43,6 +43,7 @@ class ImageResult:
     png: bytes
     backend: str
     meta: dict[str, Any] = field(default_factory=dict)
+    height_png: bytes | None = None  # relief levels on the tile canvas (procedural ground only)
 
 
 class ImageBackend(Protocol):
@@ -77,27 +78,32 @@ class ProceduralBackend:
     async def generate(self, req: ImageRequest) -> ImageResult:
         if self.latency_s:
             await asyncio.sleep(self.latency_s * (0.6 + 0.8 * ((req.seed % 997) / 997)))
-        png = await asyncio.to_thread(self._render, req)
+        png, height_png = await asyncio.to_thread(self._render, req)
         return ImageResult(
-            png=png, backend=self.name, meta={"seed": req.seed, "framing": "tile", "crisp": True}
+            png=png,
+            backend=self.name,
+            meta={"seed": req.seed, "framing": "canvas", "crisp": True},
+            height_png=height_png,
         )
 
-    def _render(self, req: ImageRequest) -> bytes:
+    def _render(self, req: ImageRequest) -> tuple[bytes, bytes]:
         from hexworld.art.procedural import render_ground
 
         h = req.hints
-        rgb = render_ground(
+        rgb, heights = render_ground(
             tile_px=h["tile_px"],
-            palette=h["palette"],
             biome=h["biome"],
             edges=h["edges"],
             coord=tuple(h["coord"]),
+            materials=h.get("materials"),
         )
-        up = max(1, req.size // h["tile_px"])
+        up = max(1, req.size // rgb.shape[0])
         big = np.repeat(np.repeat(rgb, up, 0), up, 1)
         buf = io.BytesIO()
         Image.fromarray(big, "RGB").save(buf, format="PNG")
-        return buf.getvalue()
+        hbuf = io.BytesIO()
+        Image.fromarray((heights * 40).astype(np.uint8), "L").save(hbuf, format="PNG")
+        return buf.getvalue(), hbuf.getvalue()
 
 
 ProceduralStubBackend = ProceduralBackend  # backwards-compatible name

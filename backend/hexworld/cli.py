@@ -158,7 +158,8 @@ DEFAULT_EVAL_PROMPTS = [
 async def _eval(args: argparse.Namespace) -> None:
     import numpy as np
 
-    from hexworld.art.pixelize import load_tile, seam_delta
+    from hexworld.art.grid import TileCanvas, seam_delta
+    from hexworld.art.pixelize import load_tile
     from hexworld.domain import RunOptions, TileStatus
     from hexworld.orchestrator.runtime import Runtime
 
@@ -176,9 +177,13 @@ async def _eval(args: argparse.Namespace) -> None:
         tiles = {
             t.hex: t for t in rt.store.list_tiles(world.id) if t.status == TileStatus.accepted and t.asset_id
         }
-        arrays = {h: load_tile(rt.store.get_asset(t.asset_id)) for h, t in tiles.items()}  # type: ignore[arg-type]
+        arrays = {
+            h: load_tile(rt.store.get_asset(t.ground_asset_id or t.asset_id))  # type: ignore[arg-type]
+            for h, t in tiles.items()
+        }
+        P = arrays[next(iter(arrays))].shape[0] - 3 if arrays else 64
         seams = [
-            seam_delta(arrays[h], i, arrays[h.neighbor(i)])
+            seam_delta(arrays[h], TileCanvas(h, P), i, arrays[h.neighbor(i)], TileCanvas(h.neighbor(i), P))
             for h in arrays
             for i in range(3)
             if h.neighbor(i) in arrays

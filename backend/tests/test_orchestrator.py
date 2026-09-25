@@ -3,7 +3,8 @@ from collections import defaultdict
 
 from hexworld.agents.fake import FakeClient
 from hexworld.art.backend import ImageResult, ProceduralStubBackend
-from hexworld.art.pixelize import load_tile, seam_delta
+from hexworld.art.grid import TileCanvas, seam_delta
+from hexworld.art.pixelize import load_tile
 from hexworld.domain import RunOptions, RunStatus, TileStatus
 from hexworld.hex import Hex
 
@@ -35,7 +36,11 @@ async def test_full_run_fills_plan_with_valid_seams(make_runtime):
                 assert t.edges[i].compatible_with(n.edges[(i + 3) % 6])
                 a = load_tile(rt.store.get_asset(t.ground_asset_id))
                 b = load_tile(rt.store.get_asset(n.ground_asset_id))
-                assert seam_delta(a, i, b) <= rt.settings.max_seam_delta
+                P = a.shape[0] - 3
+                assert (
+                    seam_delta(a, TileCanvas(h, P), i, b, TileCanvas(h.neighbor(i), P))
+                    <= rt.settings.max_seam_delta
+                )
     w = rt.store.get_world(world.id)
     assert w.spec and w.style and w.anchor_asset_ids
 
@@ -150,7 +155,7 @@ async def test_tile_agent_repairs_its_own_invalid_submission(make_runtime):
 
     class Flaky(FakeClient):
         def _tile_design(self, p, rng):
-            if p["directive"]["coord"] == {"q": 1, "r": 0}:
+            if p.get("coord", p["directive"].get("coord")) == {"q": 1, "r": 0}:
                 calls["n"] += 1
                 if calls["n"] == 1:
                     d = super()._tile_design(p, rng)

@@ -11,7 +11,7 @@ from collections.abc import Callable
 
 import numpy as np
 
-from hexworld.art.pixelize import seam_delta
+from hexworld.art.grid import TileCanvas, seam_delta
 from hexworld.domain import Coord, Tile, TileStatus
 from hexworld.hex import Hex, opposite
 
@@ -41,6 +41,7 @@ def copy_fits(
     if source.status != TileStatus.accepted or not source.asset_id or not source.edges:
         return False, "prototype is not an accepted tile", {}
     src_img = array(source.ground_asset_id or source.asset_id)
+    P = src_img.shape[0] - 3  # canvas C = P + 3 (art/grid.py)
     seams: dict[str, float] = {}
     for i in range(6):
         n = tiles.get(target.neighbor(i))
@@ -56,7 +57,13 @@ def copy_fits(
             )
         if not check_pixels:
             continue
-        d = seam_delta(src_img, i, array(n.ground_asset_id or n.asset_id))
+        d = seam_delta(
+            src_img,
+            TileCanvas(source.hex, P),
+            i,
+            array(n.ground_asset_id or n.asset_id),
+            TileCanvas(n.hex, P),
+        )
         seams[str(i)] = d
         if d > max_seam_delta:
             return False, f"visible seam on edge {i} (delta {d:.2f})", seams

@@ -342,7 +342,7 @@ class TileLayer(BaseModel):
     stand on it as upright billboards: side-view pixel art, optionally a horizontal strip of animation
     frames, plus a procedural motion the renderer applies."""
 
-    kind: Literal["ground", "sprite"]
+    kind: Literal["ground", "height", "sprite"]
     asset_id: str
     label: str = ""
     x: float = 0.0  # tile-local, in hex circumradius units (east +)

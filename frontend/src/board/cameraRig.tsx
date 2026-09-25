@@ -12,8 +12,8 @@ import * as THREE from "three";
 export const rig = {
   target: new THREE.Vector3(0, 0, 0),
   goalTarget: new THREE.Vector3(0, 0, 0),
-  distance: 24,
-  goalDistance: 24,
+  distance: 14,
+  goalDistance: 14,
   yaw: 0,
   goalYaw: 0,
   pitch: 0.78, // radians from vertical
@@ -28,7 +28,7 @@ export const rig = {
   },
 };
 
-const MIN_DIST = 5;
+const MIN_DIST = 2.5;
 const MAX_DIST = 140;
 const PLANE = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 

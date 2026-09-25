@@ -42,7 +42,7 @@ export function activityFrame(keys: string[]): Goal | null {
   cz /= pts.length;
   let radius = 0;
   for (const [x, z] of pts) radius = Math.max(radius, Math.hypot(x - cx, z - cz));
-  return { target: new THREE.Vector3(cx, 0, cz), distance: THREE.MathUtils.clamp(11 + radius * 2.2, 11, 70) };
+  return { target: new THREE.Vector3(cx, 0, cz), distance: THREE.MathUtils.clamp(8 + radius * 1.4, 8, 30) };
 }
 
 /** Auto-follow: frames the active build, rate limited, yields to the user; also eases toward a
@@ -58,7 +58,7 @@ export function CameraDirector() {
     const { q, r } = parseKey(selected);
     const [x, z] = hexToWorld(q, r);
     const t = new THREE.Vector3(x, 0, z);
-    rig.setGoal(rig.goalTarget.clone().lerp(t, 0.65), Math.min(rig.goalDistance, 26));
+    rig.setGoal(rig.goalTarget.clone().lerp(t, 0.65), Math.min(rig.goalDistance, 10));
     limiter.current.fire(performance.now());
   }, [selected]);
 
