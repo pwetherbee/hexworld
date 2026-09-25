@@ -53,13 +53,14 @@ async def test_neighbour_attempts_never_overlap_and_growth_starts_at_origin(make
     spans: dict[Hex, list[tuple[float, float]]] = defaultdict(list)
     started = {}
     for e in events:
-        # attempts (design -> checks) of neighbours never overlap; the review may run off the
-        # critical path once a tile is provisionally settled
+        # neighbours never design at the same time: an attempt holds its tile from its start until
+        # its ground settles (or the attempt ends); sprites and review may follow off the critical path
         if e.type == "tile.attempt.started":
-            started[e.span_id] = (Hex(e.q, e.r), e.ts)
-        elif e.type == "tile.attempt.finished" and e.span_id in started:
-            h, t0 = started.pop(e.span_id)
-            spans[h].append((t0, e.ts))
+            started[Hex(e.q, e.r)] = e.ts
+        elif e.type in ("tile.settled", "tile.attempt.finished") and Hex(e.q, e.r) in started:
+            h = Hex(e.q, e.r)
+            spans[h].append((started.pop(h), e.ts))
+    assert len(spans) >= 30  # radius 3: nearly every slot designed at least once
     for h, ivs in spans.items():
         for i in range(6):
             for a0, a1 in ivs:

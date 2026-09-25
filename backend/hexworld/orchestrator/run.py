@@ -92,6 +92,14 @@ class Job:
 
 
 @dataclass
+class Settling:
+    """A tile whose ground passed the checks; its edges are final (sprites/review may follow)."""
+
+    design: TileDesign
+    pix: PixelTile
+
+
+@dataclass
 class Candidate:
     job: Job
     attempt: Attempt
@@ -149,7 +157,7 @@ class RunExecutor:
         # settled: its edges are frozen, neighbours may build against it, and the (slower) review
         # runs off the critical path. A rejected tile keeps the edges neighbours used.
         self._busy: set[Hex] = set()
-        self._provisional: dict[Hex, Candidate] = {}
+        self._provisional: dict[Hex, Settling | Candidate] = {}
         self._freed = asyncio.Event()  # set whenever a tile stops being busy
         self._waiting: set[Hex] = set()  # rejected tiles waiting for busy neighbours before redesigning
         self._bg: set[asyncio.Task] = set()  # fire-and-forget library work (kept referenced)
@@ -1162,9 +1170,14 @@ class RunExecutor:
                     # the material this tile will almost surely paint: design it while the agent designs
                     self._background(self._ensure_material(job.directive.biome, False, jsp))
                 while True:
-                    cand = await self._produce(job, jsp)
+                    cand = await self._produce(job, jsp, on_ground_ok=lambda d, p: self._settle(t.hex, d, p))
                     if self._budget_error is not None:
                         return "budget"
+                    early = self._provisional.get(t.hex)
+                    if early is not None and (cand is None or not cand.checks.ok):
+                        # settled on its ground, then failed later: keep the edges neighbours used
+                        self._provisional.pop(t.hex, None)
+                        self._lock_edges(job, early.design)
                     if cand is not None and cand.checks.ok:
                         fut: asyncio.Future = asyncio.get_running_loop().create_future()
                         self._review_q.append((cand, fut))
@@ -1194,9 +1207,7 @@ class RunExecutor:
                             await self._refresh_if_stale(cand)
                             jsp.set(outcome="accepted", attempts=job.attempts_this_run)
                             return "accepted"
-                        for i, n in enumerate(t.hex.neighbors()):
-                            if n in self._busy or self._settled(n):
-                                job.locked[i] = cand.design.edges[i]
+                        self._lock_edges(job, cand.design)
                         cand.attempt.verdict = v
                         cand.attempt.outcome = "rejected"
                         self.store.put_attempt(cand.attempt)
@@ -1221,6 +1232,19 @@ class RunExecutor:
             self._provisional.pop(t.hex, None)
             self._freed.set()
             self._wake.set()
+
+    def _settle(self, h: Hex, design: TileDesign, pix: PixelTile) -> None:
+        """Provisionally settled: edges are final, neighbours may start building against them."""
+        self._provisional[h] = Settling(design, pix)
+        self.tracer.emit("tile.settled", q=h.q, r=h.r, data={"biome": design.biome})
+        self._busy.discard(h)
+        self._freed.set()
+        self._wake.set()
+
+    def _lock_edges(self, job: Job, design: TileDesign) -> None:
+        for i, n in enumerate(job.tile.hex.neighbors()):
+            if n in self._busy or self._settled(n):
+                job.locked[i] = design.edges[i]
 
     async def _claim(self, h: Hex) -> None:
         """Before a retry: wait until no neighbour is mid-attempt, then mark this tile busy again, so
@@ -1381,7 +1405,11 @@ class RunExecutor:
 
     # ================================================================== one attempt
 
-    async def _produce(self, job: Job, parent: Span, variant: int = 0) -> Candidate | None:
+    async def _produce(
+        self, job: Job, parent: Span, variant: int = 0, on_ground_ok: Any = None
+    ) -> Candidate | None:
+        """One attempt. `on_ground_ok(design, pix)` fires as soon as the GROUND passes the
+        deterministic checks, before sprites are composed: edges and seams are final by then."""
         t = job.tile
         h = t.hex
         job.attempts_this_run += 1
@@ -1479,6 +1507,8 @@ class RunExecutor:
                     # procedural ground: texture is the material artist's call (it reviewed its own render)
                     min_distinct_colors=0 if res.meta.get("crisp") else self.s.min_distinct_colors,
                 )
+                if checks.ok and on_ground_ok is not None:
+                    on_ground_ok(design, pix)
                 ground_id = self.store.put_asset(
                     pix.png,
                     {
