@@ -1,0 +1,1311 @@
+{
+  "$defs": {
+    "Attempt": {
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "q": {
+          "type": "integer"
+        },
+        "r": {
+          "type": "integer"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "directive": {
+          "$ref": "#/$defs/Directive"
+        },
+        "design": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TileDesign"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "asset_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "validation": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "verdict": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Verdict"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "outcome": {
+          "default": "pending",
+          "enum": [
+            "pending",
+            "invalid",
+            "rejected",
+            "accepted",
+            "error"
+          ],
+          "type": "string"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "created_at": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "run_id",
+        "q",
+        "r",
+        "attempt",
+        "directive",
+        "design",
+        "asset_id",
+        "validation",
+        "verdict",
+        "outcome",
+        "error",
+        "created_at"
+      ],
+      "title": "Attempt",
+      "type": "object"
+    },
+    "AttributeDef": {
+      "description": "One attribute tile agents may set. The super defines these; we compile them to JSON Schema.\n\nThis *is* the restricted meta-schema: the super can't emit arbitrary JSON Schema, only\ntyped, bounded attributes, so the compiled schema is always valid for strict structured\noutput and for jsonschema validation.",
+      "properties": {
+        "name": {
+          "description": "snake_case identifier",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "enum",
+            "enum_list",
+            "integer",
+            "number",
+            "boolean",
+            "string"
+          ],
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "enum_values": {
+          "description": "Allowed values for enum / enum_list types; empty otherwise.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Lower bound for integer/number; null otherwise."
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Upper bound for integer/number; null otherwise."
+        }
+      },
+      "required": [
+        "name",
+        "type",
+        "description",
+        "enum_values",
+        "minimum",
+        "maximum"
+      ],
+      "title": "AttributeDef",
+      "type": "object"
+    },
+    "Coord": {
+      "properties": {
+        "q": {
+          "type": "integer"
+        },
+        "r": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "q",
+        "r"
+      ],
+      "title": "Coord",
+      "type": "object"
+    },
+    "CopySpec": {
+      "description": "Lets the super reuse a tile instead of generating a new one (cheap filler: open sea, plain\ndesert...). The source must be a non-copy tile in this plan or an accepted tile in the world.\n\n- shallow: a linked instance. The copy shares the prototype's art and data, and stays in sync if\n  the prototype changes later.\n- deep: an independent snapshot. The copy gets its own record at copy time and never changes\n  when the prototype does. `copy_of` is kept only as provenance.",
+      "properties": {
+        "mode": {
+          "description": "'none' = generate this tile normally.",
+          "enum": [
+            "none",
+            "shallow",
+            "deep"
+          ],
+          "type": "string"
+        },
+        "source_q": {
+          "description": "Prototype tile q (ignored when mode is 'none').",
+          "type": "integer"
+        },
+        "source_r": {
+          "description": "Prototype tile r (ignored when mode is 'none').",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "mode",
+        "source_q",
+        "source_r"
+      ],
+      "title": "CopySpec",
+      "type": "object"
+    },
+    "CreateWorld": {
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "radius": {
+          "anyOf": [
+            {
+              "maximum": 40,
+              "minimum": 2,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "CreateWorld",
+      "type": "object",
+      "required": [
+        "name",
+        "radius"
+      ]
+    },
+    "Directive": {
+      "description": "What the super asks of one tile agent (derived from a PlannedTile, plus retry feedback).",
+      "properties": {
+        "coord": {
+          "$ref": "#/$defs/Coord"
+        },
+        "biome": {
+          "type": "string"
+        },
+        "intent": {
+          "type": "string"
+        },
+        "features": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "edge_hints": {
+          "items": {
+            "$ref": "#/$defs/EdgeHint"
+          },
+          "type": "array"
+        },
+        "feedback": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "simplified": {
+          "default": false,
+          "type": "boolean"
+        },
+        "duplicate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CopySpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "coord",
+        "biome",
+        "intent",
+        "features",
+        "edge_hints",
+        "feedback",
+        "simplified",
+        "duplicate"
+      ],
+      "title": "Directive",
+      "type": "object"
+    },
+    "EdgeHint": {
+      "properties": {
+        "edge": {
+          "description": "Edge index 0..5 (0 E, 1 NE, 2 NW, 3 W, 4 SW, 5 SE).",
+          "type": "integer"
+        },
+        "terrain": {
+          "type": "string"
+        },
+        "connectors": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "edge",
+        "terrain",
+        "connectors"
+      ],
+      "title": "EdgeHint",
+      "type": "object"
+    },
+    "EdgeSpec": {
+      "properties": {
+        "terrain": {
+          "description": "Terrain along this edge; one of the world's terrain_vocabulary.",
+          "type": "string"
+        },
+        "connectors": {
+          "description": "Connectors crossing this edge (subset of connector_vocabulary).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "terrain",
+        "connectors"
+      ],
+      "title": "EdgeSpec",
+      "type": "object"
+    },
+    "Event": {
+      "properties": {
+        "id": {
+          "default": 0,
+          "type": "integer"
+        },
+        "ts": {
+          "type": "number"
+        },
+        "world_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "type": {
+          "type": "string"
+        },
+        "span_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "parent_span_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "q": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "r": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "data": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "ts",
+        "world_id",
+        "run_id",
+        "type",
+        "span_id",
+        "parent_span_id",
+        "q",
+        "r",
+        "data"
+      ],
+      "title": "Event",
+      "type": "object"
+    },
+    "PlannedTile": {
+      "properties": {
+        "q": {
+          "type": "integer"
+        },
+        "r": {
+          "type": "integer"
+        },
+        "leave_empty": {
+          "description": "True to deliberately leave this slot empty.",
+          "type": "boolean"
+        },
+        "biome": {
+          "description": "Dominant terrain, from terrain_vocabulary.",
+          "type": "string"
+        },
+        "intent": {
+          "description": "One sentence: what this tile is and its role in the world.",
+          "type": "string"
+        },
+        "features": {
+          "description": "Notable features/props, e.g. 'ruined tower', 'pine trees'.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "edge_hints": {
+          "description": "Edge constraints the super wants (may be partial).",
+          "items": {
+            "$ref": "#/$defs/EdgeHint"
+          },
+          "type": "array"
+        },
+        "priority": {
+          "description": "1 (low) .. 5 (high); higher is generated earlier within its wave.",
+          "type": "integer"
+        },
+        "duplicate": {
+          "$ref": "#/$defs/CopySpec",
+          "description": "Copy another tile instead of generating (mode 'none' to generate)."
+        }
+      },
+      "required": [
+        "q",
+        "r",
+        "leave_empty",
+        "biome",
+        "intent",
+        "features",
+        "edge_hints",
+        "priority",
+        "duplicate"
+      ],
+      "title": "PlannedTile",
+      "type": "object"
+    },
+    "Run": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "world_id": {
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/$defs/Coord"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "options": {
+          "$ref": "#/$defs/RunOptions"
+        },
+        "status": {
+          "$ref": "#/$defs/RunStatus",
+          "default": "pending"
+        },
+        "created_at": {
+          "type": "number"
+        },
+        "finished_at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "stats": {
+          "$ref": "#/$defs/RunStats"
+        },
+        "plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorldPlan"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "world_id",
+        "origin",
+        "prompt",
+        "options",
+        "status",
+        "created_at",
+        "finished_at",
+        "error",
+        "stats",
+        "plan"
+      ],
+      "title": "Run",
+      "type": "object"
+    },
+    "RunOptions": {
+      "properties": {
+        "radius": {
+          "default": 2,
+          "description": "How far from the clicked tile the super may expand.",
+          "maximum": 6,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_attempts": {
+          "default": 3,
+          "maximum": 6,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "anchor_candidates": {
+          "default": 3,
+          "maximum": 6,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "review_batch": {
+          "default": 8,
+          "maximum": 16,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_llm_calls": {
+          "default": 400,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_cost_usd": {
+          "default": 2.0,
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "max_seconds": {
+          "default": 900,
+          "exclusiveMinimum": 0,
+          "type": "number"
+        }
+      },
+      "title": "RunOptions",
+      "type": "object",
+      "required": [
+        "radius",
+        "max_attempts",
+        "anchor_candidates",
+        "review_batch",
+        "max_llm_calls",
+        "max_cost_usd",
+        "max_seconds"
+      ]
+    },
+    "RunStats": {
+      "properties": {
+        "llm_calls": {
+          "default": 0,
+          "type": "integer"
+        },
+        "input_tokens": {
+          "default": 0,
+          "type": "integer"
+        },
+        "cached_input_tokens": {
+          "default": 0,
+          "type": "integer"
+        },
+        "output_tokens": {
+          "default": 0,
+          "type": "integer"
+        },
+        "cost_usd": {
+          "default": 0.0,
+          "type": "number"
+        },
+        "images": {
+          "default": 0,
+          "type": "integer"
+        },
+        "tiles_planned": {
+          "default": 0,
+          "type": "integer"
+        },
+        "tiles_accepted": {
+          "default": 0,
+          "type": "integer"
+        },
+        "tiles_failed": {
+          "default": 0,
+          "type": "integer"
+        },
+        "tiles_copied": {
+          "default": 0,
+          "type": "integer"
+        },
+        "copy_fallbacks": {
+          "default": 0,
+          "type": "integer"
+        },
+        "attempts": {
+          "default": 0,
+          "type": "integer"
+        },
+        "rejections_validation": {
+          "default": 0,
+          "type": "integer"
+        },
+        "rejections_review": {
+          "default": 0,
+          "type": "integer"
+        }
+      },
+      "title": "RunStats",
+      "type": "object",
+      "required": [
+        "llm_calls",
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+        "cost_usd",
+        "images",
+        "tiles_planned",
+        "tiles_accepted",
+        "tiles_failed",
+        "tiles_copied",
+        "copy_fallbacks",
+        "attempts",
+        "rejections_validation",
+        "rejections_review"
+      ]
+    },
+    "RunStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "completed",
+        "failed",
+        "cancelled"
+      ],
+      "title": "RunStatus",
+      "type": "string"
+    },
+    "Scores": {
+      "properties": {
+        "style": {
+          "description": "1-5 consistency with the style guide and anchor tile",
+          "type": "integer"
+        },
+        "fidelity": {
+          "description": "1-5 visual quality / readability",
+          "type": "integer"
+        },
+        "edge_continuity": {
+          "description": "1-5 how well edges continue into accepted neighbors",
+          "type": "integer"
+        },
+        "directive_fit": {
+          "description": "1-5 how well it matches its directive",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "style",
+        "fidelity",
+        "edge_continuity",
+        "directive_fit"
+      ],
+      "title": "Scores",
+      "type": "object"
+    },
+    "StartRun": {
+      "properties": {
+        "q": {
+          "type": "integer"
+        },
+        "r": {
+          "type": "integer"
+        },
+        "prompt": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "options": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RunOptions"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "q",
+        "r",
+        "prompt",
+        "options"
+      ],
+      "title": "StartRun",
+      "type": "object"
+    },
+    "StyleGuide": {
+      "description": "Shared visual contract for every tile in a world. Set once, then reused.",
+      "properties": {
+        "palette": {
+          "description": "Master palette, 12-32 '#rrggbb' colors. Every tile pixel maps to one.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tile_px": {
+          "description": "Canonical tile resolution in pixels (square canvas, hex inscribed). 32, 48 or 64.",
+          "type": "integer"
+        },
+        "view": {
+          "description": "Camera description, e.g. 'top-down orthographic'.",
+          "type": "string"
+        },
+        "light_direction": {
+          "description": "e.g. 'from the top-left'.",
+          "type": "string"
+        },
+        "outline": {
+          "description": "Outline rule, e.g. 'no outlines' or '1px dark outline on props'.",
+          "type": "string"
+        },
+        "style_keywords": {
+          "description": "Short art-direction keywords appended to every image prompt.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "palette",
+        "tile_px",
+        "view",
+        "light_direction",
+        "outline",
+        "style_keywords"
+      ],
+      "title": "StyleGuide",
+      "type": "object"
+    },
+    "Tile": {
+      "properties": {
+        "q": {
+          "type": "integer"
+        },
+        "r": {
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/TileStatus",
+          "default": "empty"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "biome": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "attributes": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "edges": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/EdgeSpec"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "asset_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "preview_asset_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "side_color": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "art_prompt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "copy_of": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Coord"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "copy_mode": {
+          "anyOf": [
+            {
+              "enum": [
+                "shallow",
+                "deep"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "attempts": {
+          "default": 0,
+          "type": "integer"
+        },
+        "directive": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Directive"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "visibility": {
+          "default": "visible",
+          "enum": [
+            "visible",
+            "fogged",
+            "hidden"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "q",
+        "r",
+        "status",
+        "run_id",
+        "biome",
+        "summary",
+        "attributes",
+        "edges",
+        "asset_id",
+        "preview_asset_id",
+        "side_color",
+        "art_prompt",
+        "copy_of",
+        "copy_mode",
+        "attempts",
+        "directive",
+        "visibility"
+      ],
+      "title": "Tile",
+      "type": "object"
+    },
+    "TileDesign": {
+      "properties": {
+        "biome": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "attributes": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "edges": {
+          "items": {
+            "$ref": "#/$defs/EdgeSpec"
+          },
+          "type": "array"
+        },
+        "art_prompt": {
+          "type": "string"
+        },
+        "negative_prompt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "biome",
+        "summary",
+        "attributes",
+        "edges",
+        "art_prompt",
+        "negative_prompt"
+      ],
+      "title": "TileDesign",
+      "type": "object"
+    },
+    "TileDetail": {
+      "properties": {
+        "tile": {
+          "$ref": "#/$defs/Tile"
+        },
+        "attempts": {
+          "items": {
+            "$ref": "#/$defs/Attempt"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "tile",
+        "attempts"
+      ],
+      "title": "TileDetail",
+      "type": "object"
+    },
+    "TileStatus": {
+      "enum": [
+        "empty",
+        "planned",
+        "intentionally_empty",
+        "generating",
+        "reviewing",
+        "accepted",
+        "failed"
+      ],
+      "title": "TileStatus",
+      "type": "string"
+    },
+    "Verdict": {
+      "properties": {
+        "label": {
+          "description": "The number drawn on the candidate in the composite image.",
+          "type": "integer"
+        },
+        "accept": {
+          "type": "boolean"
+        },
+        "scores": {
+          "$ref": "#/$defs/Scores"
+        },
+        "feedback": {
+          "description": "If rejected: concrete, actionable fix for the tile agent. Else ''.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "label",
+        "accept",
+        "scores",
+        "feedback"
+      ],
+      "title": "Verdict",
+      "type": "object"
+    },
+    "World": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "radius": {
+          "type": "integer"
+        },
+        "created_at": {
+          "type": "number"
+        },
+        "spec": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorldSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "style": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StyleGuide"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tile_attributes": {
+          "items": {
+            "$ref": "#/$defs/AttributeDef"
+          },
+          "type": "array"
+        },
+        "anchor_asset_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "radius",
+        "created_at",
+        "spec",
+        "style",
+        "tile_attributes",
+        "anchor_asset_ids"
+      ],
+      "title": "World",
+      "type": "object"
+    },
+    "WorldDetail": {
+      "properties": {
+        "world": {
+          "$ref": "#/$defs/World"
+        },
+        "tiles": {
+          "items": {
+            "$ref": "#/$defs/Tile"
+          },
+          "type": "array"
+        },
+        "runs": {
+          "items": {
+            "$ref": "#/$defs/Run"
+          },
+          "type": "array"
+        },
+        "active_run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_event_id": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "world",
+        "tiles",
+        "runs",
+        "active_run_id",
+        "last_event_id"
+      ],
+      "title": "WorldDetail",
+      "type": "object"
+    },
+    "WorldPlan": {
+      "properties": {
+        "world": {
+          "$ref": "#/$defs/WorldSpec"
+        },
+        "style": {
+          "$ref": "#/$defs/StyleGuide"
+        },
+        "tile_attributes": {
+          "items": {
+            "$ref": "#/$defs/AttributeDef"
+          },
+          "type": "array"
+        },
+        "tiles": {
+          "items": {
+            "$ref": "#/$defs/PlannedTile"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "world",
+        "style",
+        "tile_attributes",
+        "tiles"
+      ],
+      "title": "WorldPlan",
+      "type": "object"
+    },
+    "WorldSpec": {
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "genre": {
+          "description": "e.g. 'adventure', 'board game with cards', 'turn-based tactics'.",
+          "type": "string"
+        },
+        "theme": {
+          "type": "string"
+        },
+        "lore": {
+          "description": "2-4 sentences.",
+          "type": "string"
+        },
+        "terrain_vocabulary": {
+          "description": "Allowed edge/biome terrain names (snake_case), e.g. grass, water, sand, rock, snow.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "connector_vocabulary": {
+          "description": "Allowed linear features that cross tile edges (snake_case), e.g. road, river, wall.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "directional_notes": {
+          "description": "General layout direction, e.g. 'mountains north, coast east'.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "genre",
+        "theme",
+        "lore",
+        "terrain_vocabulary",
+        "connector_vocabulary",
+        "directional_notes"
+      ],
+      "title": "WorldSpec",
+      "type": "object"
+    }
+  },
+  "description": "Umbrella model: exported as JSON Schema and turned into frontend TypeScript types.",
+  "properties": {
+    "world": {
+      "$ref": "#/$defs/World"
+    },
+    "world_detail": {
+      "$ref": "#/$defs/WorldDetail"
+    },
+    "tile": {
+      "$ref": "#/$defs/Tile"
+    },
+    "tile_detail": {
+      "$ref": "#/$defs/TileDetail"
+    },
+    "run": {
+      "$ref": "#/$defs/Run"
+    },
+    "event": {
+      "$ref": "#/$defs/Event"
+    },
+    "start_run": {
+      "$ref": "#/$defs/StartRun"
+    },
+    "create_world": {
+      "$ref": "#/$defs/CreateWorld"
+    }
+  },
+  "required": [
+    "world",
+    "world_detail",
+    "tile",
+    "tile_detail",
+    "run",
+    "event",
+    "start_run",
+    "create_world"
+  ],
+  "title": "ApiSchemas",
+  "type": "object"
+}

@@ -1,0 +1,70 @@
+{
+  "_comment": "Neighbor-context inpainting: accepted neighbor tiles are drawn on {{context_image}}; {{mask_image}} is white over the target hex. Output is the FULL canvas; the backend crops the target hex. Uses latent noise masking so it works with non-inpaint checkpoints (Z-Image Turbo). Swap in a FLUX.2 [klein] / Qwen-Image-Edit graph (with {{ref_image_1}} = anchor tile) for stronger style locking.",
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": { "unet_name": "z_image_turbo_bf16.safetensors", "weight_dtype": "fp8_e4m3fn" }
+  },
+  "2": {
+    "class_type": "CLIPLoader",
+    "inputs": { "clip_name": "qwen_3_4b.safetensors", "type": "lumina2", "device": "default" }
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "inputs": { "vae_name": "ae.safetensors" }
+  },
+  "4": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": { "model": ["1", 0], "lora_name": "pixel_art_zimage.safetensors", "strength_model": 0.8 }
+  },
+  "5": {
+    "class_type": "ModelSamplingAuraFlow",
+    "inputs": { "model": ["4", 0], "shift": 3.0 }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "clip": ["2", 0], "text": "pixel art, seamless continuation of the surrounding map tiles, {{prompt}}" }
+  },
+  "7": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "clip": ["2", 0], "text": "{{negative}}" }
+  },
+  "8": {
+    "class_type": "LoadImage",
+    "inputs": { "image": "{{context_image}}" }
+  },
+  "9": {
+    "class_type": "LoadImageMask",
+    "inputs": { "image": "{{mask_image}}", "channel": "red" }
+  },
+  "10": {
+    "class_type": "VAEEncode",
+    "inputs": { "pixels": ["8", 0], "vae": ["3", 0] }
+  },
+  "11": {
+    "class_type": "SetLatentNoiseMask",
+    "inputs": { "samples": ["10", 0], "mask": ["9", 0] }
+  },
+  "12": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["5", 0],
+      "positive": ["6", 0],
+      "negative": ["7", 0],
+      "latent_image": ["11", 0],
+      "seed": "{{seed}}",
+      "steps": 8,
+      "cfg": 1.0,
+      "sampler_name": "res_multistep",
+      "scheduler": "simple",
+      "denoise": 0.92
+    }
+  },
+  "13": {
+    "class_type": "VAEDecode",
+    "inputs": { "samples": ["12", 0], "vae": ["3", 0] }
+  },
+  "14": {
+    "class_type": "SaveImage",
+    "inputs": { "images": ["13", 0], "filename_prefix": "hexworld/inpaint" }
+  }
+}

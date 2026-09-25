@@ -1,0 +1,24 @@
+# runtime data (sqlite, generated tile PNGs, run logs)
+/data/
+.env
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# node
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# os / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# licensed third-party audio (see scripts/import-sfx.mjs)
+frontend/public/sfx/
