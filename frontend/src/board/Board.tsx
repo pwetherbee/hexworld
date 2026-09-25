@@ -62,8 +62,12 @@ function Tiles() {
 /** Dev only: expose the scene for debugging from the browser console (window.__hexScene). */
 function DevProbe() {
   const scene = useThree((s) => s.scene);
+  const camera = useThree((s) => s.camera);
   useEffect(() => {
-    (window as unknown as { __hexScene?: unknown }).__hexScene = scene;
-  }, [scene]);
+    const w = window as unknown as { __hexScene?: unknown; __hexStore?: unknown; __hexCamera?: unknown };
+    w.__hexScene = scene;
+    w.__hexStore = useStore;
+    w.__hexCamera = camera;
+  }, [scene, camera]);
   return null;
 }

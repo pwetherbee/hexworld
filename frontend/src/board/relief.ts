@@ -34,17 +34,18 @@ async function loadLevels(id: string): Promise<Levels> {
   return { C: bmp.width, data };
 }
 
+/** The heightmap for `id`, or null while it loads (never a previous id's levels). */
 export function useLevels(id: string | null | undefined): Levels | null {
-  const [lv, setLv] = useState<Levels | null>(() => (id ? cache.get(id) ?? null : null));
+  const [state, setState] = useState<{ id: string; lv: Levels } | null>(() => {
+    const hit = id ? cache.get(id) : undefined;
+    return id && hit ? { id, lv: hit } : null;
+  });
   useEffect(() => {
-    if (!id) {
-      setLv(null);
-      return;
-    }
+    if (!id) return;
     let alive = true;
     const hit = cache.get(id);
     if (hit) {
-      setLv(hit);
+      setState({ id, lv: hit });
       return;
     }
     let p = pending.get(id);
@@ -56,12 +57,14 @@ export function useLevels(id: string | null | undefined): Levels | null {
       });
       pending.set(id, p);
     }
-    p.then((l) => alive && setLv(l)).catch(() => alive && setLv(null));
+    p.then((l) => alive && setState({ id, lv: l })).catch(() => undefined);
     return () => {
       alive = false;
     };
   }, [id]);
-  return lv;
+  if (!id) return null;
+  if (state?.id === id) return state.lv;
+  return cache.get(id) ?? null;
 }
 
 type Frame = { s: number; C: number; cx: number; cy: number; ox: number; oy: number };

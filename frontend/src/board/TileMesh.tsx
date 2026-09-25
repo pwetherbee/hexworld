@@ -194,7 +194,7 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
 
   return (
     <>
-      <mesh geometry={SHARED.emptyFace} position={[x, 0.003, z]} rotation={[0, 0, 0]}>
+      <mesh geometry={SHARED.emptyFace} position={[x, 0.003, z]} rotation={[0, 0, 0]} raycast={NO_RAYCAST}>
         <meshBasicMaterial ref={shadowMat} color="#000000" transparent opacity={0} depthWrite={false} />
       </mesh>
       <group
@@ -219,12 +219,12 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
         </mesh>
         {tex && (
           reliefGeo ? (
-            <mesh geometry={reliefGeo} position={[0, height + 0.002, 0]}>
+            <mesh key="relief" geometry={reliefGeo} position={[0, height + 0.002, 0]}>
               {/* terraces extruded from the heightmap; unlit texture, walls shaded per vertex */}
               <meshBasicMaterial map={tex} vertexColors side={THREE.DoubleSide} />
             </mesh>
           ) : (
-            <mesh geometry={faceGeo} position={[0, height + 0.002, 0]}>
+            <mesh key="flat" geometry={faceGeo} position={[0, height + 0.002, 0]}>
               {/* unlit: the pixel art shows its exact colours */}
               <meshBasicMaterial map={tex} transparent={!accepted} opacity={accepted ? 1 : 0.85} alphaTest={0.5} />
             </mesh>
@@ -241,14 +241,14 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
             landedAt={acceptedAt}
           />
         ))}
-        <lineLoop ref={sel} geometry={SEL_GEO} position={[0, height + 0.01, 0]} visible={false}>
+        <lineLoop ref={sel} geometry={SEL_GEO} position={[0, height + 0.01, 0]} visible={false} raycast={NO_RAYCAST}>
           <lineBasicMaterial ref={selMat} color="#fde68a" transparent depthTest={false} />
         </lineLoop>
-        <lineLoop ref={scan} geometry={SCAN_GEO} visible={false}>
+        <lineLoop ref={scan} geometry={SCAN_GEO} visible={false} raycast={NO_RAYCAST}>
           <lineBasicMaterial color="#67e8f9" transparent opacity={0.9} />
         </lineLoop>
       </group>
-      <mesh ref={ring} geometry={RING_GEO} position={[x, 0.02, z]} rotation={[-Math.PI / 2, 0, 0]} visible={false}>
+      <mesh ref={ring} geometry={RING_GEO} position={[x, 0.02, z]} rotation={[-Math.PI / 2, 0, 0]} visible={false} raycast={NO_RAYCAST}>
         <meshBasicMaterial
           ref={ringMat}
           color={ringColor}

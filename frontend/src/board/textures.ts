@@ -27,20 +27,24 @@ function load(id: string): Promise<THREE.Texture> {
   return p;
 }
 
+/** The texture for `id`, or null while it loads. Never returns a previous id's texture: callers
+ * derive geometry from it (canvas size), and a stale value would be cached under the new id. */
 export function usePixelTexture(id: string | null | undefined): THREE.Texture | null {
-  const [tex, setTex] = useState<THREE.Texture | null>(() => (id ? cache.get(id) ?? null : null));
+  const [state, setState] = useState<{ id: string; tex: THREE.Texture } | null>(() => {
+    const hit = id ? cache.get(id) : undefined;
+    return id && hit ? { id, tex: hit } : null;
+  });
   useEffect(() => {
-    if (!id) {
-      setTex(null);
-      return;
-    }
+    if (!id) return;
     let alive = true;
     const hit = cache.get(id);
-    if (hit) setTex(hit);
-    else load(id).then((t) => alive && setTex(t)).catch(() => alive && setTex(null));
+    if (hit) setState({ id, tex: hit });
+    else load(id).then((t) => alive && setState({ id, tex: t })).catch(() => undefined);
     return () => {
       alive = false;
     };
   }, [id]);
-  return tex;
+  if (!id) return null;
+  if (state?.id === id) return state.tex;
+  return cache.get(id) ?? null;
 }
