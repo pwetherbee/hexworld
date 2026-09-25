@@ -142,6 +142,10 @@ async def test_tile_agent_errors_are_isolated(make_runtime):
 
     class Flaky(FakeClient):
         async def complete(self, req):
+            if req.task == "tile_design_batch":  # the model "forgets" (1,0): falls back to a single call
+                res = await super().complete(req)
+                res.data["designs"] = [d for d in res.data["designs"] if (d["q"], d["r"]) != (1, 0)]
+                return res
             if req.task == "tile_design" and req.payload["directive"]["coord"] == {"q": 1, "r": 0}:
                 calls["n"] += 1
                 if calls["n"] <= 2:  # first attempt: both the call and its repair fail

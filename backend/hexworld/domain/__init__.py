@@ -393,14 +393,14 @@ class World(BaseModel):
 
 class RunOptions(BaseModel):
     radius: int = Field(
-        default=2, ge=1, le=6, description="How far from the clicked tile the super may expand."
+        default=5, ge=1, le=8, description="How far from the clicked tile the super may expand."
     )
     max_attempts: int = Field(default=3, ge=1, le=6)
     anchor_candidates: int = Field(default=3, ge=1, le=6)
-    review_batch: int = Field(default=8, ge=1, le=16)
-    max_llm_calls: int = Field(default=400, ge=1)
+    review_batch: int = Field(default=12, ge=1, le=16)
+    max_llm_calls: int = Field(default=1500, ge=1)
     max_cost_usd: float = Field(default=2.0, gt=0)
-    max_seconds: float = Field(default=900, gt=0)
+    max_seconds: float = Field(default=2400, gt=0)
 
 
 class RunStats(BaseModel):

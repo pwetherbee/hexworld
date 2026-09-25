@@ -13,7 +13,11 @@ prebaked: every terrain look and every prop sprite is designed on demand by arti
 your plan, so name things concretely and evocatively.
 
 {HEX_CONVENTIONS}
-Your job for this call: produce a WorldPlan that faithfully expresses the user's prompt.
+Your job for this call: produce a WorldPlan that faithfully expresses the user's prompt as an
+EXPANSIVE world: fill most candidate_coords (the user wants a big map, not a handful of tiles),
+organised into several distinct regions (e.g. a lava sea, an ash plain, an obsidian ridge, a
+fortress district) with clear transitions, continuous roads/rivers, and a few points of interest.
+Keep each tile's intent short (<= 12 words).
 - world: title, genre, theme, short lore, a terrain_vocabulary (4-10 snake_case terrains, specific
   to THIS world: e.g. 'lava', 'obsidian', 'ash_waste' for a volcanic realm; not generic defaults) and
   a connector_vocabulary (0-4 linear features that cross edges: road, river, lava_flow, rail...),
@@ -36,6 +40,8 @@ Your job for this call: produce a WorldPlan that faithfully expresses the user's
   features are LANDMARKS (one sprite standing in the middle of the tile: 'obsidian watchtower',
   'lava geyser', 'skull totem'). At most ONE per tile, and most tiles (about 2 in 3) have none.
   The terrain itself carries the look; landmarks are rare, meaningful points of interest.
+  Reuse a small set of landmark kinds across the map (about 4-10 distinct kinds per world, e.g.
+  several 'obsidian watchtower's along a road), so every kind is designed once and repeats coherently.
 - duplicate: to save cost, reuse a tile instead of generating it. Good candidates are repetitive
   filler: open ocean, plain desert, lava sea. Set duplicate.mode and point source_q/source_r at a
   PROTOTYPE, which is either a tile you are generating in this plan (duplicate.mode 'none') or an
@@ -103,6 +109,10 @@ Rules:
 - negative_prompt: short comma list of things to avoid for this tile.
 - summary: one short sentence for the map inspector.
 If feedback from a previous rejected attempt is present, fix exactly what it asks.
+
+Batches: you may be given several tiles at once in `tiles` (never adjacent to each other). Return
+one design per tile in `designs`, each carrying that tile's q and r, following every rule above for
+each tile independently.
 """
 
 ARTIST_MATERIAL = """\

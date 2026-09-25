@@ -746,9 +746,9 @@
     "RunOptions": {
       "properties": {
         "radius": {
-          "default": 2,
+          "default": 5,
           "description": "How far from the clicked tile the super may expand.",
-          "maximum": 6,
+          "maximum": 8,
           "minimum": 1,
           "type": "integer"
         },
@@ -765,13 +765,13 @@
           "type": "integer"
         },
         "review_batch": {
-          "default": 8,
+          "default": 12,
           "maximum": 16,
           "minimum": 1,
           "type": "integer"
         },
         "max_llm_calls": {
-          "default": 400,
+          "default": 1500,
           "minimum": 1,
           "type": "integer"
         },
@@ -781,7 +781,7 @@
           "type": "number"
         },
         "max_seconds": {
-          "default": 900,
+          "default": 2400,
           "exclusiveMinimum": 0,
           "type": "number"
         }
@@ -1061,11 +1061,11 @@
     "SpriteProgram": {
       "properties": {
         "width": {
-          "description": "Canvas width in pixels (4-32). Match the ground's pixel scale.",
+          "description": "Canvas width in pixels (4-18). Match the ground's pixel scale.",
           "type": "integer"
         },
         "height": {
-          "description": "Canvas height in pixels (4-32).",
+          "description": "Canvas height in pixels (4-22).",
           "type": "integer"
         },
         "colors": {

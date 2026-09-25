@@ -13,7 +13,7 @@ export function PromptModal() {
   const world = useStore((s) => s.world);
   const [shown, setShown] = useState(target);
   const [prompt, setPrompt] = useState("");
-  const [radius, setRadius] = useState(2);
+  const [radius, setRadius] = useState(5);
   const [maxAttempts, setMaxAttempts] = useState(3);
   const [maxCost, setMaxCost] = useState(2);
   const [busy, setBusy] = useState(false);
@@ -84,7 +84,7 @@ export function PromptModal() {
           <div className="options">
             <label>
               Radius <b>{radius}</b>
-              <input type="range" min={1} max={5} value={radius} onChange={(e) => setRadius(+e.target.value)} />
+              <input type="range" min={1} max={8} value={radius} onChange={(e) => setRadius(+e.target.value)} />
             </label>
             <label>
               Attempts <b>{maxAttempts}</b>

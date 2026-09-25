@@ -250,11 +250,11 @@ export interface SpriteEntry {
  */
 export interface SpriteProgram {
   /**
-   * Canvas width in pixels (4-32). Match the ground's pixel scale.
+   * Canvas width in pixels (4-18). Match the ground's pixel scale.
    */
   width: number;
   /**
-   * Canvas height in pixels (4-32).
+   * Canvas height in pixels (4-22).
    */
   height: number;
   /**

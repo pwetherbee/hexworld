@@ -738,7 +738,10 @@ class RunExecutor:
     async def _generate(self, active: list[Job], wave_span: Span) -> None:
         opts = self.run.options
         while active:
-            results = await asyncio.gather(*[self._produce(j, wave_span) for j in active])
+            designs = await self._design_batch(active, wave_span)
+            results = await asyncio.gather(
+                *[self._produce(j, wave_span, design=designs.get(j.tile.hex)) for j in active]
+            )
             self._raise_budget()
             candidates = [c for c in results if c is not None and c.checks.ok]
             verdicts = await self._review(candidates, wave_span) if candidates else {}
@@ -795,7 +798,56 @@ class RunExecutor:
 
     # ================================================================== one attempt
 
-    async def _produce(self, job: Job, parent: Span, variant: int = 0) -> Candidate | None:
+    async def _design_batch(self, jobs: list[Job], parent: Span, chunk: int = 10) -> dict[Hex, TileDesign]:
+        """Tile agents for a whole wave in a few calls: tiles in a wave are never adjacent, so each
+        design only depends on already-accepted neighbours. Anything missing is designed per tile."""
+        if len(jobs) < 2:
+            return {}
+        world = self.world
+        style = world.style
+        assert style is not None
+        out: dict[Hex, TileDesign] = {}
+        chunks = [jobs[i : i + chunk] for i in range(0, len(jobs), chunk)]
+
+        async def one(batch: list[Job]) -> None:
+            items = []
+            for j in batch:
+                h = j.tile.hex
+                neighbors, arrays, _ = self._neighbor_context(h)
+                by_hex = {h.neighbor(i): a for i, a in arrays.items()}
+                items.append(
+                    {
+                        "directive": j.directive,
+                        "neighbors": neighbors,
+                        "context_png": neighborhood_png(h, by_hex, style.tile_px) if by_hex else None,
+                    }
+                )
+            async with self.tracer.span("tile.design_batch", parent, tiles=[j.tile.key for j in batch]) as sp:
+                try:
+                    got = await tile_agent.design_wave(
+                        self.gw,
+                        world=world,
+                        tiles=items,
+                        anchor_png=self._anchor_png(),
+                        parent=sp,
+                        sprite_library=sorted(world.sprites),
+                    )
+                except BudgetExceeded as e:
+                    self._budget_error = e
+                    return
+                except Exception as e:  # noqa: BLE001 - fall back to per-tile design
+                    sp.set(error=str(e)[:200])
+                    return
+                sp.set(designed=len(got), missing=len(batch) - len(got))
+                for (q, r), d in got.items():
+                    out[Hex(q, r)] = d
+
+        await asyncio.gather(*[one(b) for b in chunks])
+        return out
+
+    async def _produce(
+        self, job: Job, parent: Span, variant: int = 0, design: TileDesign | None = None
+    ) -> Candidate | None:
         t = job.tile
         h = t.hex
         job.attempts_this_run += 1
@@ -825,18 +877,19 @@ class RunExecutor:
                 anchor = self._anchor_png()
 
                 # 1) tile agent designs (LLM)
-                async with self.tracer.span("tile.design", sp) as dsp:
-                    design = await tile_agent.design_tile(
-                        self.gw,
-                        world=world,
-                        directive=job.directive,
-                        neighbors=neighbors,
-                        schema=tile_agent.tile_design_schema(world),
-                        anchor_png=anchor,
-                        context_png=neighborhood_png(h, arrays_by_hex, P) if arrays_by_hex else None,
-                        parent=dsp,
-                        sprite_library=sorted(world.sprites),
-                    )
+                async with self.tracer.span("tile.design", sp, batched=design is not None) as dsp:
+                    if design is None:
+                        design = await tile_agent.design_tile(
+                            self.gw,
+                            world=world,
+                            directive=job.directive,
+                            neighbors=neighbors,
+                            schema=tile_agent.tile_design_schema(world),
+                            anchor_png=anchor,
+                            context_png=neighborhood_png(h, arrays_by_hex, P) if arrays_by_hex else None,
+                            parent=dsp,
+                            sprite_library=sorted(world.sprites),
+                        )
                     design, norm = tile_agent.normalize_design(design, world, facing)
                     dsp.set(biome=design.biome, summary=design.summary, normalization=norm)
                 attempt.design = design

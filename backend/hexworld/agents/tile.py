@@ -222,3 +222,91 @@ async def design_tile(
     )
     design, _ = await gw.call(req, TileDesign, parent=parent)
     return design  # type: ignore[return-value]
+
+
+def wave_design_schema(world: World) -> dict[str, Any]:
+    item = tile_design_schema(world)
+    item = {
+        **item,
+        "properties": {"q": {"type": "integer"}, "r": {"type": "integer"}, **item["properties"]},
+        "required": ["q", "r", *item["required"]],
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "designs": {"type": "array", "items": item, "description": "One per tile in `tiles`."}
+        },
+        "required": ["designs"],
+        "additionalProperties": False,
+    }
+
+
+async def design_wave(
+    gw: LLMGateway,
+    *,
+    world: World,
+    tiles: list[dict[str, Any]],
+    anchor_png: bytes | None,
+    parent: Span | None,
+    sprite_library: list[str] | None = None,
+) -> dict[tuple[int, int], TileDesign]:
+    """Design several non-adjacent tiles in one call (shared world context sent once).
+
+    `tiles`: [{"directive": Directive, "neighbors": [...], "context_png": bytes | None}]. Tiles the
+    model omits or gets wrong are simply missing from the result; the caller designs those one by one.
+    """
+    assert world.spec is not None and world.style is not None
+    payload = {
+        "world": world.spec.model_dump(),
+        "style": world.style.model_dump(exclude={"palette"}),
+        "attributes": [a.model_dump() for a in world.tile_attributes],
+        "sprite_library": sprite_library or [],
+        "tiles": [
+            {
+                "q": t["directive"].coord.q,
+                "r": t["directive"].coord.r,
+                "directive": t["directive"].model_dump(mode="json"),
+                "neighbors": t["neighbors"],
+            }
+            for t in tiles
+        ],
+    }
+    images: list[ImagePart] = []
+    if anchor_png:
+        images.append(ImagePart(anchor_png, label="World anchor tile (style reference):", detail="low"))
+    for t in tiles:
+        if t.get("context_png"):
+            c = t["directive"].coord
+            images.append(
+                ImagePart(
+                    t["context_png"],
+                    label=f"Map around tile ({c.q},{c.r}) (its slot is the dark centre hex):",
+                    detail="low",
+                )
+            )
+    wanted = {(t["directive"].coord.q, t["directive"].coord.r) for t in tiles}
+
+    def validate(data: dict[str, Any]) -> None:
+        got = {(d.get("q"), d.get("r")) for d in data.get("designs", [])}
+        if not got & wanted:
+            raise ValueError("designs must use the q,r of the tiles you were given")
+
+    req = LLMRequest(
+        role="tile",
+        task="tile_design_batch",
+        system=prompts.TILE_DESIGN,
+        payload=payload,
+        schema=wave_design_schema(world),
+        images=images,
+    )
+    data, _ = await gw.call(req, None, parent=parent, validate=validate)
+    out: dict[tuple[int, int], TileDesign] = {}
+    for d in data.get("designs", []):  # type: ignore[union-attr]
+        key = (d.get("q"), d.get("r"))
+        if key not in wanted or key in out:
+            continue
+        try:
+            out[key] = TileDesign.model_validate({k: v for k, v in d.items() if k not in ("q", "r")})
+        except ValueError:
+            continue
+    return out

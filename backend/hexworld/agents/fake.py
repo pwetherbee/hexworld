@@ -246,6 +246,19 @@ class FakeClient:
             )
         return {"verdicts": verdicts}
 
+    def _tile_design_batch(self, p: dict[str, Any], rng: random.Random) -> dict[str, Any]:
+        designs = []
+        for t in p["tiles"]:
+            single = {
+                "world": p["world"],
+                "attributes": p["attributes"],
+                "directive": t["directive"],
+                "neighbors": t["neighbors"],
+            }
+            d = self._tile_design(single, _rng("tile", single))
+            designs.append({"q": t["q"], "r": t["r"], **d})
+        return {"designs": designs}
+
     # Test-double artists: minimal, valid programs so the pipeline can be exercised in tests.
     def _material_design(self, p: dict[str, Any], rng: random.Random) -> dict[str, Any]:
         from hexworld.agents.themes import base_color
