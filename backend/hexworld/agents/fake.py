@@ -6,14 +6,12 @@ understanding needs HEXWORLD_LLM=openai."""
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import math
 import random
 from typing import Any
 
-from hexworld.agents.llm import LLMRequest, LLMResult, Role
 from hexworld.agents.themes import THEMES, palette_for, pick_genre, pick_theme
 from hexworld.hex import Hex
 
@@ -24,30 +22,49 @@ def _rng(*parts: Any) -> random.Random:
 
 
 class FakeClient:
+    """The 'brain' behind FakeAdkLlm (agents/kit.py): given an agent's task payload and what it has
+    done so far in the session, returns the next tool call a well-behaved agent would make."""
+
     name = "fake"
 
-    def __init__(self, *, latency_s: float = 0.35, reject_rate: float = 0.15, duplicate_rate: float = 0.3):
+    def __init__(self, *, latency_s: float = 0.0, reject_rate: float = 0.15, duplicate_rate: float = 0.3):
         self.latency_s = latency_s
         self.reject_rate = reject_rate
         self.duplicate_rate = duplicate_rate
 
-    def model_for(self, role: Role) -> str:
-        return f"fake-{role}"
+    SUBMIT = {
+        "world_plan": ("submit_plan", "plan"),
+        "tile_design": ("submit_design", "design"),
+        "wave_review": ("submit_verdicts", None),
+        "anchor_pick": ("submit_anchor", None),
+        "material_design": ("submit_material", "spec"),
+        "sprite_design": ("submit_sprite", "program"),
+    }
+    RENDER = {"material_design": "render_material", "sprite_design": "render_sprite"}
 
-    async def complete(self, req: LLMRequest) -> LLMResult:
-        rng = _rng(req.task, req.payload)
-        if self.latency_s:
-            await asyncio.sleep(self.latency_s * (0.5 + rng.random()))
-        handler = getattr(self, f"_{req.task}")
-        data = handler(req.payload, rng)
-        itok = len(json.dumps(req.payload, default=str)) // 4 + 85 * len(req.images) + len(req.system) // 4
-        return LLMResult(
-            data=data,
-            model=self.model_for(req.role),
-            input_tokens=itok,
-            cached_input_tokens=len(req.system) // 4,
-            output_tokens=len(json.dumps(data)) // 4,
-        )
+    def act(
+        self,
+        payload: dict[str, Any],
+        called: list[str],
+        last_response: dict[str, Any] | None,
+        followups: list[str],
+        tools: set[str],
+    ) -> tuple[str, dict[str, Any]]:
+        task = payload.get("task", "")
+        if task == "direct":
+            return (
+                ("finish", {"note": "on track"})
+                if "view_map" in called or "view_map" not in tools
+                else ("view_map", {})
+            )
+        rng = _rng(task, payload, len(followups))
+        data = getattr(self, f"_{task}")(payload, rng)
+        render = self.RENDER.get(task)
+        arg_name = self.SUBMIT[task][1]
+        if render and render in tools and render not in called:  # look at the draft once
+            return render, {arg_name: data}
+        name, key = self.SUBMIT[task]
+        return name, ({key: data} if key else data)
 
     # ------------------------------------------------------------------ world_plan
     def _world_plan(self, p: dict[str, Any], rng: random.Random) -> dict[str, Any]:
@@ -245,19 +262,6 @@ class FakeClient:
                 }
             )
         return {"verdicts": verdicts}
-
-    def _tile_design_batch(self, p: dict[str, Any], rng: random.Random) -> dict[str, Any]:
-        designs = []
-        for t in p["tiles"]:
-            single = {
-                "world": p["world"],
-                "attributes": p["attributes"],
-                "directive": t["directive"],
-                "neighbors": t["neighbors"],
-            }
-            d = self._tile_design(single, _rng("tile", single))
-            designs.append({"q": t["q"], "r": t["r"], **d})
-        return {"designs": designs}
 
     # Test-double artists: minimal, valid programs so the pipeline can be exercised in tests.
     def _material_design(self, p: dict[str, Any], rng: random.Random) -> dict[str, Any]:

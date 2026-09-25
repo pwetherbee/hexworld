@@ -135,20 +135,15 @@ def summarize(run, events) -> str:  # noqa: ANN001
 
 
 async def _models() -> None:
-    from hexworld.agents.llm import OpenAIClient
+    from hexworld.agents.llm import list_openai_models
 
     st = get_settings()
-    client = OpenAIClient(
-        api_key=st.openai_api_key,
-        base_url=st.openai_base_url,
-        super_model=st.super_model,
-        tile_model=st.tile_model,
-    )
-    models = await client.list_models()
+    models = await list_openai_models(st.openai_api_key, st.openai_base_url)
+    roles = {"super": st.super_model, "tile": st.tile_model, "artist": st.artist_model or st.tile_model}
     for m in models:
-        mark = "  <- super" if m == st.super_model else "  <- tile" if m == st.tile_model else ""
-        print(m + mark)
-    for role, m in (("super", st.super_model), ("tile", st.tile_model)):
+        tags = [r for r, name in roles.items() if name == m]
+        print(m + (f"  <- {', '.join(tags)}" if tags else ""))
+    for role, m in roles.items():
         if m not in models:
             print(f"WARNING: configured {role} model {m!r} not visible to this key", file=sys.stderr)
 

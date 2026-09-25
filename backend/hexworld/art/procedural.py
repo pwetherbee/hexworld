@@ -296,3 +296,39 @@ def render_ground(
             elif own.boundary == "lip" and own.rank > other.rank:
                 out[r_, c_] = R["dark"]
     return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def material_preview_png(
+    name: str, spec: MaterialSpec, tile_px: int, contrast: MaterialSpec | None = None
+) -> bytes:
+    """What the material artist sees: a small patch of this material (4 tiles, showing seamless
+    tiling) plus one tile bordering a contrasting material (showing the boundary treatment)."""
+    import io
+
+    from hexworld.art.composite import render_region
+    from hexworld.art.pixelize import hex_mask
+
+    other = contrast or fallback_material("neutral_stone")
+    mats = {name: spec, "__contrast": other}
+    tiles: dict[Hex, np.ndarray] = {}
+    mask = hex_mask(tile_px)
+    same = [{"terrain": name, "connectors": []}] * 6
+    mixed = [{"terrain": name if i in (0, 1, 5) else "__contrast", "connectors": []} for i in range(6)]
+    for h, edges in (
+        (Hex(0, 0), same),
+        (Hex(1, 0), same),
+        (Hex(0, 1), same),
+        (Hex(1, -1), same),
+        (Hex(2, 0), mixed),
+    ):
+        g = render_ground(
+            tile_px=tile_px, palette=[], biome=name, edges=edges, coord=(h.q, h.r), materials=mats
+        )
+        rgba = np.zeros((tile_px, tile_px, 4), np.uint8)
+        rgba[mask, :3] = g[mask]
+        rgba[mask, 3] = 255
+        tiles[h] = rgba
+    img = render_region(tiles, tile_px=tile_px, scale=5)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()

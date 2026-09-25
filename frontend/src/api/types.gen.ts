@@ -648,6 +648,10 @@ export interface Verdict {
    * If rejected: concrete, actionable fix for the tile agent. Else ''.
    */
   feedback: string;
+  /**
+   * If the landmark sprite itself needs work: an instruction for the sprite artist. Else ''.
+   */
+  sprite_feedback: string;
 }
 /**
  * This interface was referenced by `ApiSchemas`'s JSON-Schema

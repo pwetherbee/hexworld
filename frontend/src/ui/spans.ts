@@ -81,7 +81,21 @@ export function spanLabel(s: SpanRow): string {
     case "tile.design":
       return "tile agent · design";
     case "llm.call":
-      return `llm · ${d.role}:${d.task}${d.repair ? " (repair)" : ""}`;
+      return `llm · ${d.agent ?? d.role}${d.tool_calls?.length ? ` → ${d.tool_calls.join(", ")}` : ""}`;
+    case "agent":
+      return `${d.agent} · ${d.label}${d.turn > 1 ? ` (turn ${d.turn})` : ""}`;
+    case "super.direct":
+      return `super · director after ring ${d.ring}`;
+    case "library.material":
+      return `material artist · ${d.material}`;
+    case "library.sprite":
+      return `sprite artist · ${d.kind}`;
+    case "library.sprite_revise":
+      return `sprite artist · revise ${d.kind}`;
+    case "tile.layers":
+      return "compose layers";
+    case "tile.copy":
+      return `copy ${d.mode} from ${d.source}`;
     case "image.generate":
       return `image · ${d.served_by ?? d.backend} · ${d.mode}`;
     case "super.review":
@@ -93,7 +107,10 @@ export function spanLabel(s: SpanRow): string {
 
 export function spanColor(s: SpanRow): string {
   if (s.ok === false) return "#ef4444";
-  if (s.name === "llm.call") return (s.data as any).role === "super" ? "#a78bfa" : "#60a5fa";
+  const who = String((s.data as any).agent ?? "");
+  if (s.name === "llm.call") return who.startsWith("super") ? "#a78bfa" : "#60a5fa";
+  if (s.name === "agent") return who.startsWith("super") ? "#7c3aed" : who.includes("artist") ? "#db2777" : "#2563eb";
+  if (s.name.startsWith("library")) return "#f472b6";
   if (s.name === "image.generate") return "#34d399";
   if (s.name.startsWith("super")) return "#c084fc";
   if (s.name === "tile.attempt") return "#fbbf24";

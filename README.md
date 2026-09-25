@@ -31,21 +31,33 @@ Open http://localhost:5173 and click a hex. Every role (super, tile agents, mate
 artist) runs on a real model configured per role in `.env`. `hexworld models` lists what your key
 can use. Real responses are recorded, so `HEXWORLD_LLM=replay` can re-run a run for free.
 
+## Agents (Google ADK)
+
+Every run is a collaboration between ADK agents with tools, each in its own persistent session:
+
+| agent | tools | job |
+|---|---|---|
+| **super planner** | `submit_plan` | world spec, style, game-specific tile attributes, the map plan (regions, landmarks, copies) |
+| **super anchor** | `submit_anchor` | picks the style anchor from renders of the origin tile |
+| **super reviewer** | `zoom_candidate`, `submit_verdicts` | reviews each wave with vision; routes feedback to the tile agent, the material artist or the sprite artist |
+| **super director** | `view_map`, `list_pending`, `update_tiles`, `commission_sprite`, `redo_tile`, `finish` | checks in after every ring and steers the rest of the build |
+| **tile agent** (one per tile) | `view_surroundings`, `list_library`, `request_prop`, `submit_design` | designs its tile against its neighbours; revises in the same session when rejected |
+| **material artist** | `render_material`, `submit_material` | draws a terrain's ground pattern, *looks at its render*, revises, submits |
+| **sprite artist** | `render_sprite`, `submit_sprite` | draws a prop from pixel primitives, *looks at its render*, revises, submits |
+
+Budgets (calls, $, wall clock), per-agent call caps, validation and the wave scheduler live in the
+orchestrator. Every agent turn, LLM call and tool call is traced into the event stream, and the
+inspector's **Agents** tab shows each session as a transcript.
+
 ## Nothing is prebaked
 
-The engine contains interpreters, not content:
-
-- **Material artist** (sub-agent) writes a *material program* for each terrain and connector: a
-  colour ramp plus pattern ops (patches, stripes, voronoi cells + bevel, cellfill, speckle, pixel
-  decals), boundary style (foam/glow/lip) and optional ambient scatter. `art/procedural.py`
-  renders it in world space, so tiles are seamless by construction.
-- **Sprite artist** (sub-agent) writes a *sprite program*: primitives (rect/ellipse/tri/line/pixel)
-  with colour-ramp tones, auto-shading, frames and a motion (sway/bob/flicker/pulse).
-  `art/sprites.py` rasterizes it with an outline into an animation strip.
-- Both go into the world's **session library**, which is designed once and reused by every later
-  tile. Concurrent requests for the same new asset are single-flighted.
-- Tiles are **layered**: a ground layer plus at most one landmark sprite in the middle. Dense
-  vegetation may add a few small scatter sprites. Sprites render as upright billboards.
+The engine contains interpreters, not content. The **material DSL** (`art/procedural.py`: colour
+ramp + patches, stripes, voronoi cells + bevel, cellfill, speckle, pixel decals, boundary style)
+renders in world space, so tiles are seamless by construction. The **sprite DSL**
+(`art/sprites.py`: rect/ellipse/tri/line/pixel with ramp tones, auto-shading, frames and motion)
+rasterizes to outlined animation strips. The world's **session library** starts empty and grows
+only when a tile or agent first needs an asset. Each one is designed once and reused, and a
+material revision repaints every tile that uses it.
 
 ## How a run works
 

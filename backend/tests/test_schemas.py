@@ -3,18 +3,23 @@ import pytest
 from pydantic import ValidationError
 
 from hexworld.agents.fake import FakeClient
-from hexworld.agents.llm import LLMRequest, strict_schema
-from hexworld.agents.super import ANCHOR_SCHEMA, PLAN_SCHEMA, REVIEW_SCHEMA
-from hexworld.agents.tile import normalize_design, tile_design_schema
+from hexworld.agents.llm import strict_schema
+from hexworld.agents.tile import design_model, normalize_design
 from hexworld.domain import (
+    AnchorPick,
     AttributeDef,
     EdgeSpec,
     StyleGuide,
     TileDesign,
+    WaveReview,
     World,
     WorldPlan,
     compile_attribute_schema,
 )
+
+PLAN_SCHEMA = strict_schema(WorldPlan)
+REVIEW_SCHEMA = strict_schema(WaveReview)
+ANCHOR_SCHEMA = strict_schema(AnchorPick)
 
 
 def _walk(node, path="$"):
@@ -71,25 +76,23 @@ def test_style_guide_coercion():
 
 
 async def _fake_plan() -> WorldPlan:
-    req = LLMRequest(
-        role="super",
-        task="world_plan",
-        system="",
-        schema=PLAN_SCHEMA,
-        payload={
+    import random
+
+    data = FakeClient()._world_plan(
+        {
             "existing_world": None,
             "user_prompt": "a pirate island",
             "origin": {"q": 0, "r": 0},
             "candidate_coords": [{"q": 0, "r": 0, "ring": 0}, {"q": 1, "r": 0, "ring": 1}],
             "existing_tiles_nearby": [],
         },
+        random.Random(0),
     )
-    res = await FakeClient(latency_s=0).complete(req)
-    jsonschema.validate(res.data, PLAN_SCHEMA)
-    return WorldPlan.model_validate(res.data)
+    jsonschema.validate(data, PLAN_SCHEMA)
+    return WorldPlan.model_validate(data)
 
 
-async def test_fake_plan_is_schema_valid_and_tile_schema_compiles():
+async def test_fake_plan_is_schema_valid_and_design_model_uses_world_vocab():
     plan = await _fake_plan()
     world = World(
         id="w",
@@ -100,7 +103,7 @@ async def test_fake_plan_is_schema_valid_and_tile_schema_compiles():
         style=plan.style,
         tile_attributes=plan.tile_attributes,
     )
-    schema = tile_design_schema(world)
+    schema = design_model(world).model_json_schema()
     jsonschema.Draft202012Validator.check_schema(schema)
     assert schema["properties"]["biome"]["enum"] == plan.world.terrain_vocabulary
 

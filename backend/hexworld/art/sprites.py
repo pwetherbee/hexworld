@@ -174,3 +174,52 @@ def flatten(ground: np.ndarray, placed: list[Placed], tile_px: int) -> np.ndarra
         keep = mask[Y, X]
         out[Y[keep], X[keep]] = fr[ys[keep], xs[keep]]
     return out
+
+
+# ----------------------------------------------------------------------------- artist previews
+
+
+def preview_png(art: SpriteArt, scale: int = 8) -> bytes:
+    """What the sprite artist sees: every frame side by side, enlarged, on a neutral ground line."""
+    pad = 2
+    w = (art.w + pad) * len(art.frames) + pad
+    h = art.h + pad * 2 + 2
+    canvas = np.zeros((h, w, 4), dtype=np.uint8)
+    canvas[..., :3] = (58, 62, 74)
+    canvas[..., 3] = 255
+    canvas[-3:, :, :3] = (92, 84, 70)  # ground strip
+    for i, fr in enumerate(art.frames):
+        x0 = pad + i * (art.w + pad)
+        y0 = h - 3 - art.h
+        region = canvas[y0 : y0 + art.h, x0 : x0 + art.w]
+        m = fr[..., 3] > 0
+        region[m] = fr[m]
+    img = Image.fromarray(canvas, "RGBA").resize((w * scale, h * scale), Image.Resampling.NEAREST)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def lint(program: SpriteProgram, art: SpriteArt) -> list[str]:
+    """Cheap objective feedback for the artist alongside the render."""
+    out: list[str] = []
+    fr = art.frames[0]
+    opaque = fr[..., 3] > 0
+    if opaque.sum() < 8:
+        out.append("almost nothing visible: shapes may be outside the canvas or too small")
+    else:
+        lum = fr[..., :3].astype(np.float32) @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+        dark = (lum < 55) & opaque
+        if dark.sum() / opaque.sum() > 0.55:
+            out.append(
+                "mostly very dark: add lighter mid-tones and a few highlight pixels so it reads on the map"
+            )
+    outside = [
+        i
+        for i, s in enumerate(program.shapes)
+        if s.op in ("rect", "pixel")
+        and (s.x >= program.width or s.y >= program.height or s.x + max(1, s.w) <= 0)
+    ]
+    if outside:
+        out.append(f"shapes {outside[:6]} are outside the {program.width}x{program.height} canvas")
+    return out

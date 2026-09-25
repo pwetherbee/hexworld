@@ -314,6 +314,15 @@ class Verdict(BaseModel):
     accept: bool
     scores: Scores
     feedback: str = Field(description="If rejected: concrete, actionable fix for the tile agent. Else ''.")
+    sprite_feedback: str = Field(
+        default="",
+        description="If the landmark sprite itself needs work: an instruction for the sprite artist. Else ''.",
+    )
+    material_feedback: str = Field(
+        default="",
+        description="If a terrain's shared ground pattern looks wrong: '<material name>: instruction' for "
+        "the material artist (repaints every tile using it). Else ''.",
+    )
 
 
 class WaveReview(BaseModel):

@@ -34,6 +34,7 @@ def copy_fits(
     array: Callable[[str], np.ndarray],
     max_seam_delta: float,
     check_pixels: bool = True,
+    check_edges: bool = True,
 ) -> tuple[bool, str, dict[str, float]]:
     """Edge contract always; pixel seams only when the copy will reuse the prototype's pixels
     (a copy re-rendered in place by a deterministic ground renderer is seamless by construction)."""
@@ -46,7 +47,7 @@ def copy_fits(
         if not (n and n.status == TileStatus.accepted and n.edges and n.asset_id):
             continue
         facing = n.edges[opposite(i)]
-        if not source.edges[i].compatible_with(facing):
+        if check_edges and not source.edges[i].compatible_with(facing):
             return (
                 False,
                 f"edge {i} mismatch: prototype has {source.edges[i].terrain}{source.edges[i].connectors}, "

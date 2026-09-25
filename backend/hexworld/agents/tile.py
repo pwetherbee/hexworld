@@ -1,89 +1,49 @@
-"""Tile agent: designs one hex (attributes, edges, art prompt) from a directive + neighbor context."""
+"""Tile agent (Google ADK): designs one hex tile, with tools, in a session that persists across
+attempts, so the super's feedback continues the same conversation."""
 
-from __future__ import annotations
+import inspect
+from typing import Any, Literal
 
-from typing import Any
+from google.adk.tools import ToolContext
+from pydantic import BaseModel, Field, ValidationError, create_model
 
 from hexworld.agents import prompts
-from hexworld.agents.llm import ImagePart, LLMGateway, LLMRequest
-from hexworld.domain import AttributeDef, Directive, EdgeSpec, TileDesign, World, compile_attribute_schema
+from hexworld.agents.kit import AgentHandle, AgentKit, image_part, submitted, text_part
+from hexworld.domain import AttributeDef, Directive, EdgeSpec, PropSpec, TileDesign, World
 from hexworld.telemetry import Span
 
 
-def tile_design_schema(world: World) -> dict[str, Any]:
-    """Per-world structured-output schema, compiled from the super's vocabularies + attributes.
-
-    Numeric bounds are communicated via descriptions and enforced by `normalize_design`
-    (clamping) rather than schema keywords, which keeps the schema portable across providers.
-    """
+def design_model(world: World) -> type[BaseModel]:
+    """Per-world submission schema: terrains/connectors/attribute enums become real enums, so the
+    model sees exactly what is allowed (the super defined these for this world)."""
     assert world.spec is not None
-    terrains = world.spec.terrain_vocabulary
-    connectors = world.spec.connector_vocabulary
-    attrs = compile_attribute_schema(_described_bounds(world.tile_attributes))
-    for p in attrs["properties"].values():
-        p.pop("minimum", None)
-        p.pop("maximum", None)
-    connector_item: dict[str, Any] = (
-        {"type": "string", "enum": connectors} if connectors else {"type": "string"}
+    terr = Literal[tuple(world.spec.terrain_vocabulary)]  # type: ignore[valid-type]
+    conn = Literal[tuple(world.spec.connector_vocabulary)] if world.spec.connector_vocabulary else str  # type: ignore[valid-type]
+    edge = create_model("Edge", terrain=(terr, ...), connectors=(list[conn], Field(default_factory=list)))
+    fields: dict[str, Any] = {}
+    for a in _described_bounds(world.tile_attributes):
+        if a.type == "enum":
+            t: Any = Literal[tuple(a.enum_values)]
+        elif a.type == "enum_list":
+            t = list[Literal[tuple(a.enum_values)]]
+        else:
+            t = {"integer": int, "number": float, "boolean": bool, "string": str}[a.type]
+        fields[a.name] = (t, Field(description=a.description))
+    attrs = create_model("Attributes", **fields)
+    return create_model(
+        "TileDesignSubmission",
+        biome=(terr, Field(description="dominant terrain")),
+        summary=(str, Field(description="one short sentence for the map inspector")),
+        attributes=(attrs, ...),
+        edges=(list[edge], Field(description="exactly 6, index = edge number (0 E,1 NE,2 NW,3 W,4 SW,5 SE)")),
+        art_prompt=(str, Field(description="1-3 sentences, GROUND only, top-down")),
+        negative_prompt=(str, ""),
+        relief=(int, Field(description="0 liquid/flat .. 3 mountainous (render height)")),
+        props=(
+            list[PropSpec],
+            Field(default_factory=list, description="0 or 1 landmark (the directive's feature)"),
+        ),
     )
-    edge = {
-        "type": "object",
-        "properties": {
-            "terrain": {"type": "string", "enum": terrains},
-            "connectors": {"type": "array", "items": connector_item},
-        },
-        "required": ["terrain", "connectors"],
-        "additionalProperties": False,
-    }
-    return {
-        "type": "object",
-        "properties": {
-            "biome": {"type": "string", "enum": terrains},
-            "summary": {"type": "string"},
-            "attributes": attrs,
-            "edges": {
-                "type": "array",
-                "items": edge,
-                "description": "Exactly 6 items; index = edge number 0..5.",
-            },
-            "art_prompt": {"type": "string"},
-            "negative_prompt": {"type": "string"},
-            "relief": {
-                "type": "integer",
-                "description": "Visual height of the tile (render only): 0 water/lava/flat, 1 plains, 2 hills/forest, 3 mountains.",
-            },
-            "props": {
-                "type": "array",
-                "description": "0-3 sprites standing on the tile (buildings, landmarks, creatures, special trees). "
-                "Ambient vegetation/rocks are added automatically from the biome; do not list them.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "kind": {
-                            "type": "string",
-                            "description": "e.g. 'dark castle', 'campfire', 'crystal spire'",
-                        },
-                        "x": {"type": "number", "description": "-0.6 west .. 0.6 east"},
-                        "y": {"type": "number", "description": "-0.6 north .. 0.6 south"},
-                        "scale": {"type": "number", "description": "0.6 .. 1.6"},
-                    },
-                    "required": ["kind", "x", "y", "scale"],
-                    "additionalProperties": False,
-                },
-            },
-        },
-        "required": [
-            "biome",
-            "summary",
-            "attributes",
-            "edges",
-            "art_prompt",
-            "negative_prompt",
-            "relief",
-            "props",
-        ],
-        "additionalProperties": False,
-    }
 
 
 def _described_bounds(attrs: list[AttributeDef]) -> list[AttributeDef]:
@@ -178,135 +138,108 @@ def _default(a: AttributeDef) -> Any:
     return ""
 
 
-async def design_tile(
-    gw: LLMGateway,
-    *,
-    world: World,
-    directive: Directive,
-    neighbors: list[dict[str, Any]],
-    schema: dict[str, Any],
-    context_png: bytes | None,
-    anchor_png: bytes | None,
-    parent: Span | None,
-    sprite_library: list[str] | None = None,
-) -> TileDesign:
-    assert world.spec is not None and world.style is not None
-    payload = {
-        # stable, world-level prefix (identical across all tile calls in a world)
-        "world": world.spec.model_dump(),
-        "style": world.style.model_dump(exclude={"palette"}),
-        "attributes": [a.model_dump() for a in world.tile_attributes],
-        # per-tile
-        "directive": directive.model_dump(mode="json"),
-        "neighbors": neighbors,
-        "sprite_library": sprite_library or [],
-    }
-    images: list[ImagePart] = []
-    if anchor_png:
-        images.append(ImagePart(anchor_png, label="World anchor tile (style reference):", detail="low"))
-    if context_png:
-        images.append(
-            ImagePart(
-                context_png,
-                label="Map around your tile (your slot is the dark hex in the center):",
-                detail="low",
-            )
-        )
-    req = LLMRequest(
-        role="tile",
-        task="tile_design",
-        system=prompts.TILE_DESIGN,
-        payload=payload,
-        schema=schema,
-        images=images,
-    )
-    design, _ = await gw.call(req, TileDesign, parent=parent)
-    return design  # type: ignore[return-value]
+class TileAgent:
+    """One agent per tile per run. Tools: view_surroundings, list_library, request_prop, submit_design."""
 
+    def __init__(self, kit: AgentKit, *, world: World, directive: Directive, api: Any):
+        self.world = world
+        self.directive = directive
+        self.api = api  # RunExecutor facade: surroundings(), library(), commission_sprite()
+        self.holder: dict[str, Any] = {}
+        c = directive.coord
+        submission = design_model(world)
 
-def wave_design_schema(world: World) -> dict[str, Any]:
-    item = tile_design_schema(world)
-    item = {
-        **item,
-        "properties": {"q": {"type": "integer"}, "r": {"type": "integer"}, **item["properties"]},
-        "required": ["q", "r", *item["required"]],
-    }
-    return {
-        "type": "object",
-        "properties": {
-            "designs": {"type": "array", "items": item, "description": "One per tile in `tiles`."}
-        },
-        "required": ["designs"],
-        "additionalProperties": False,
-    }
+        def view_surroundings() -> dict:
+            """See the map around your tile (your slot is the dark centre hex) plus neighbour details."""
+            info, png = api.surroundings(c.q, c.r)
+            out: dict[str, Any] = {"neighbors": info}
+            if png:
+                out["map"] = image_part(png)
+            return out
 
+        def list_library() -> dict:
+            """Sprites and materials already designed for this world (reuse sprite kinds by exact name)."""
+            return api.library()
 
-async def design_wave(
-    gw: LLMGateway,
-    *,
-    world: World,
-    tiles: list[dict[str, Any]],
-    anchor_png: bytes | None,
-    parent: Span | None,
-    sprite_library: list[str] | None = None,
-) -> dict[tuple[int, int], TileDesign]:
-    """Design several non-adjacent tiles in one call (shared world context sent once).
+        async def request_prop(kind: str, brief: str) -> dict:
+            """Commission a landmark sprite from the sprite artist (or reuse it if the library has it).
+            Returns the sprite's preview so you can decide whether to use it."""
+            entry, png = await api.commission_sprite(kind, brief, c.q, c.r)
+            if entry is None:
+                return {
+                    "error": "the sprite artist could not produce it; continue without, or try another kind"
+                }
+            out: dict[str, Any] = {"kind": entry.kind, "size_px": [entry.px_w, entry.px_h]}
+            if png:
+                out["preview"] = image_part(png)
+            return out
 
-    `tiles`: [{"directive": Directive, "neighbors": [...], "context_png": bytes | None}]. Tiles the
-    model omits or gets wrong are simply missing from the result; the caller designs those one by one.
-    """
-    assert world.spec is not None and world.style is not None
-    payload = {
-        "world": world.spec.model_dump(),
-        "style": world.style.model_dump(exclude={"palette"}),
-        "attributes": [a.model_dump() for a in world.tile_attributes],
-        "sprite_library": sprite_library or [],
-        "tiles": [
-            {
-                "q": t["directive"].coord.q,
-                "r": t["directive"].coord.r,
-                "directive": t["directive"].model_dump(mode="json"),
-                "neighbors": t["neighbors"],
-            }
-            for t in tiles
-        ],
-    }
-    images: list[ImagePart] = []
-    if anchor_png:
-        images.append(ImagePart(anchor_png, label="World anchor tile (style reference):", detail="low"))
-    for t in tiles:
-        if t.get("context_png"):
-            c = t["directive"].coord
-            images.append(
-                ImagePart(
-                    t["context_png"],
-                    label=f"Map around tile ({c.q},{c.r}) (its slot is the dark centre hex):",
-                    detail="low",
+        def submit_design(design: Any, tool_context: ToolContext) -> dict:
+            """Submit your tile design."""
+            try:
+                d = TileDesign.model_validate(
+                    design.model_dump() if hasattr(design, "model_dump") else design
                 )
-            )
-    wanted = {(t["directive"].coord.q, t["directive"].coord.r) for t in tiles}
+            except ValidationError as e:
+                return {"error": str(e)[:700]}
+            return submitted(tool_context, self.holder, design=d)
 
-    def validate(data: dict[str, Any]) -> None:
-        got = {(d.get("q"), d.get("r")) for d in data.get("designs", [])}
-        if not got & wanted:
-            raise ValueError("designs must use the q,r of the tiles you were given")
+        submit_design.__signature__ = inspect.Signature(
+            [  # type: ignore[attr-defined]
+                inspect.Parameter("design", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=submission),
+                inspect.Parameter(
+                    "tool_context", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=ToolContext
+                ),
+            ]
+        )
+        submit_design.__annotations__ = {"design": submission, "tool_context": ToolContext, "return": dict}
 
-    req = LLMRequest(
-        role="tile",
-        task="tile_design_batch",
-        system=prompts.TILE_DESIGN,
-        payload=payload,
-        schema=wave_design_schema(world),
-        images=images,
-    )
-    data, _ = await gw.call(req, None, parent=parent, validate=validate)
-    out: dict[tuple[int, int], TileDesign] = {}
-    for d in data.get("designs", []):  # type: ignore[union-attr]
-        key = (d.get("q"), d.get("r"))
-        if key not in wanted or key in out:
-            continue
-        try:
-            out[key] = TileDesign.model_validate({k: v for k, v in d.items() if k not in ("q", "r")})
-        except ValueError:
-            continue
-    return out
+        self.handle: AgentHandle = kit.agent(
+            name="tile_agent",
+            role="tile",
+            instruction=prompts.TILE_DESIGN,
+            tools=[view_surroundings, list_library, request_prop, submit_design],
+            label=f"tile {c.q},{c.r}",
+            q=c.q,
+            r=c.r,
+            holder=self.holder,
+        )
+
+    async def design(
+        self,
+        *,
+        neighbors: list[dict[str, Any]],
+        context_png: bytes | None,
+        anchor_png: bytes | None,
+        parent: Span | None,
+    ) -> TileDesign | None:
+        w = self.world
+        assert w.spec is not None and w.style is not None
+        payload = {
+            "task": "tile_design",
+            "world": w.spec.model_dump(),
+            "style": w.style.model_dump(exclude={"palette"}),
+            "attributes": [a.model_dump() for a in w.tile_attributes],
+            "directive": self.directive.model_dump(mode="json"),
+            "neighbors": neighbors,
+            "sprite_library": sorted(w.sprites),
+        }
+        parts = [text_part(payload)]
+        if anchor_png:
+            parts += [text_part("World anchor tile (style reference):"), image_part(anchor_png)]
+        if context_png:
+            parts += [
+                text_part("Map around your tile (your slot is the dark centre hex):"),
+                image_part(context_png),
+            ]
+        res = await self.handle.run(parts, parent, max_calls=6)
+        return res.get("design")
+
+    async def revise(self, feedback: str, *, parent: Span | None) -> TileDesign | None:
+        """Agent-to-agent feedback: the reviewer's note continues this tile agent's session."""
+        msg = (
+            f"The super agent rejected your tile: {feedback}\n"
+            "Revise the design to address this and submit it again with submit_design."
+        )
+        res = await self.handle.run([text_part(msg)], parent, max_calls=5)
+        return res.get("design")

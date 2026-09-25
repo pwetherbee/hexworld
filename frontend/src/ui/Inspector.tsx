@@ -8,6 +8,7 @@ import { buildSpans, spanColor, spanLabel } from "./spans";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "run", label: "Run" },
+  { id: "agents", label: "Agents" },
   { id: "library", label: "Library" },
   { id: "timeline", label: "Timeline" },
   { id: "tile", label: "Tile" },
@@ -32,6 +33,7 @@ export function Inspector() {
       </nav>
       <div className="tab-body">
         {open && tab === "run" && <RunPanel />}
+        {open && tab === "agents" && <AgentsPanel />}
         {open && tab === "library" && <LibraryPanel />}
         {open && tab === "timeline" && <Timeline />}
         {open && tab === "tile" && <TilePanel />}
@@ -195,6 +197,92 @@ function RunCard({ run }: { run: Run }) {
 }
 
 const fmt = (n: number) => (n >= 10000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
+
+// ------------------------------------------------------------------ agents
+
+type AgentSession = {
+  id: string;
+  agent: string;
+  label: string;
+  start: number;
+  end: number | null;
+  ok: boolean | null;
+  items: { kind: "call" | "result" | "message" | "llm"; text: string; error?: boolean }[];
+};
+
+const asText = (v: unknown) => (typeof v === "string" ? v : JSON.stringify(v));
+
+/** Every agent turn in the focused run as a transcript: which agent did what, with which tools. */
+function AgentsPanel() {
+  const { events, focusRunId } = useStore();
+  const [filter, setFilter] = useState<"all" | "super" | "tile" | "artist">("all");
+  const [open, setOpen] = useState<string | null>(null);
+  const sessions = useMemo(() => {
+    const by = new Map<string, AgentSession>();
+    for (const e of events) {
+      if (e.run_id !== focusRunId) continue;
+      const d = (e.data ?? {}) as Record<string, any>;
+      if (e.type === "agent.started" && e.span_id) {
+        by.set(e.span_id, { id: e.span_id, agent: d.agent, label: d.label, start: e.ts, end: null, ok: null, items: [] });
+      } else if (e.type === "agent.finished" && e.span_id && by.has(e.span_id)) {
+        const s = by.get(e.span_id)!;
+        s.end = e.ts;
+        s.ok = d.ok !== false && d.submitted !== false;
+      } else if (e.span_id && by.has(e.span_id)) {
+        const s = by.get(e.span_id)!;
+        if (e.type === "agent.tool_call") s.items.push({ kind: "call", text: `${d.tool}(${asText(d.args)})` });
+        else if (e.type === "agent.tool_result")
+          s.items.push({ kind: "result", text: `${d.tool} → ${asText(d.response)}`, error: !!d.error });
+        else if (e.type === "agent.message") s.items.push({ kind: "message", text: d.text });
+      } else if (e.type === "llm.call.finished" && e.parent_span_id && by.has(e.parent_span_id)) {
+        by.get(e.parent_span_id)!.items.push({
+          kind: "llm",
+          text: `${d.model} · ${d.input_tokens}→${d.output_tokens} tok · ${Math.round(d.duration_ms)}ms`,
+        });
+      }
+    }
+    return [...by.values()].sort((a, b) => b.start - a.start);
+  }, [events, focusRunId]);
+  const shown = sessions.filter(
+    (s) => filter === "all" || (filter === "artist" ? s.agent?.includes("artist") : s.agent?.startsWith(filter)),
+  );
+  if (!sessions.length) return <div className="hint">No agent activity for this run yet.</div>;
+  return (
+    <div className="agents">
+      <div className="row small">
+        {(["all", "super", "tile", "artist"] as const).map((f) => (
+          <button key={f} className={`chip-btn ${filter === f ? "on" : ""}`} onClick={() => setFilter(f)}>
+            {f}
+          </button>
+        ))}
+        <span className="muted">{shown.length} turns</span>
+      </div>
+      {shown.slice(0, 250).map((s) => (
+        <div
+          key={s.id}
+          className={`agent-card ${s.agent?.split("_")[0]}`}
+          onClick={() => setOpen(open === s.id ? null : s.id)}
+        >
+          <div className="row">
+            <span className={`dot ${s.end ? (s.ok ? "done" : "") : "pulse"}`} />
+            <b className="mono">{s.agent}</b>
+            <span className="ellipsis muted">{s.label}</span>
+            <span className="mono muted small">{s.end ? `${(s.end - s.start).toFixed(1)}s` : "…"}</span>
+          </div>
+          {open === s.id && (
+            <ol className="transcript">
+              {s.items.map((it, i) => (
+                <li key={i} className={`${it.kind} ${it.error ? "err" : ""}`}>
+                  <span className="mono">{it.text}</span>
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 // ------------------------------------------------------------------ library
 

@@ -6,7 +6,7 @@ import { sfx } from "./sfx";
 
 const MAX_EVENTS = 6000;
 
-export type Tab = "run" | "library" | "timeline" | "tile" | "log";
+export type Tab = "run" | "agents" | "library" | "timeline" | "tile" | "log";
 
 export type LibSprite = { kind: string; asset_id: string; px_w: number; px_h: number; frames: number };
 

@@ -1562,13 +1562,19 @@
         "feedback": {
           "description": "If rejected: concrete, actionable fix for the tile agent. Else ''.",
           "type": "string"
+        },
+        "sprite_feedback": {
+          "default": "",
+          "description": "If the landmark sprite itself needs work: an instruction for the sprite artist. Else ''.",
+          "type": "string"
         }
       },
       "required": [
         "label",
         "accept",
         "scores",
-        "feedback"
+        "feedback",
+        "sprite_feedback"
       ],
       "title": "Verdict",
       "type": "object"

@@ -21,7 +21,7 @@ async def test_super_duplicates_filler_tiles_shallow_and_deep(make_runtime):
     for c in copies:
         src = tiles[c.copy_of.hex]
         assert src.status == TileStatus.accepted and src.copy_of is None  # always a root prototype
-        assert c.edges == src.edges and c.biome == src.biome
+        assert c.biome == src.biome
         # procedural ground: the copy is re-rendered in place (same design, own pixels), same props
         assert c.ground_asset_id and [x.asset_id for x in c.layers[1:]] == [
             x.asset_id for x in src.layers[1:]

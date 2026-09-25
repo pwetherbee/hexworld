@@ -2,7 +2,6 @@ import asyncio
 from collections import defaultdict
 
 from hexworld.agents.fake import FakeClient
-from hexworld.agents.llm import LLMOutputError, LLMRequest, LLMResult, RecordingClient, ReplayClient
 from hexworld.art.backend import ImageResult, ProceduralStubBackend
 from hexworld.art.pixelize import load_tile, seam_delta
 from hexworld.domain import RunOptions, RunStatus, TileStatus
@@ -122,10 +121,8 @@ async def test_invalid_images_fail_after_attempts_plus_simplified(make_runtime):
 
 
 class BrokenReviewer(FakeClient):
-    async def complete(self, req: LLMRequest) -> LLMResult:
-        if req.task == "wave_review":
-            raise LLMOutputError("reviewer down")
-        return await super().complete(req)
+    def _wave_review(self, p, rng):
+        raise RuntimeError("reviewer down")
 
 
 async def test_review_failure_degrades_to_deterministic_accept(make_runtime):
@@ -137,27 +134,52 @@ async def test_review_failure_degrades_to_deterministic_accept(make_runtime):
     )
 
 
-async def test_tile_agent_errors_are_isolated(make_runtime):
+async def test_tile_agent_repairs_its_own_invalid_submission(make_runtime):
+    """An invalid submit_design comes back to the agent as a tool error; it fixes and resubmits
+    in the same session (no extra attempt needed)."""
     calls = defaultdict(int)
 
     class Flaky(FakeClient):
-        async def complete(self, req):
-            if req.task == "tile_design_batch":  # the model "forgets" (1,0): falls back to a single call
-                res = await super().complete(req)
-                res.data["designs"] = [d for d in res.data["designs"] if (d["q"], d["r"]) != (1, 0)]
-                return res
-            if req.task == "tile_design" and req.payload["directive"]["coord"] == {"q": 1, "r": 0}:
+        def _tile_design(self, p, rng):
+            if p["directive"]["coord"] == {"q": 1, "r": 0}:
                 calls["n"] += 1
-                if calls["n"] <= 2:  # first attempt: both the call and its repair fail
-                    return LLMResult(data={"nope": 1}, model="flaky")
-            return await super().complete(req)
+                if calls["n"] == 1:
+                    d = super()._tile_design(p, rng)
+                    return {**d, "edges": d["edges"][:3]}  # invalid: must be exactly 6
+            return super()._tile_design(p, rng)
 
     rt = make_runtime(llm=Flaky(latency_s=0, reject_rate=0))
     world, run = await _run(rt, radius=1)
     t = _tiles(rt, world)[Hex(1, 0)]
-    assert t.status == TileStatus.accepted and t.attempts == 2
-    atts = rt.store.list_attempts(run_ids=[run.id], q=1, r=0)
-    assert atts[0].outcome == "error" and "invalid output" in atts[0].error
+    assert t.status == TileStatus.accepted and t.attempts == 1 and calls["n"] >= 2
+    errs = [
+        e
+        for e in rt.store.list_events(run_id=run.id)
+        if e.type == "agent.tool_result" and e.data.get("error")
+    ]
+    assert errs and errs[0].q == 1 and errs[0].r == 0
+
+
+async def test_reviewer_feedback_goes_back_to_the_same_tile_agent(make_runtime):
+    rt = make_runtime(fake_reject_rate=1.0)
+    world, run = await _run(rt, radius=1)
+    events = rt.store.list_events(run_id=run.id)
+    revisions = [e for e in events if e.type == "tile.design.started" and e.data.get("revision")]
+    assert revisions, "rejected tiles should be revised through their existing agent session"
+    agents = [e for e in events if e.type == "agent.started" and e.data.get("agent") == "tile_agent"]
+    by_tile = defaultdict(set)
+    for e in agents:
+        by_tile[(e.q, e.r)].add(e.data.get("turn"))
+    assert any(turns >= {1, 2} for turns in by_tile.values())
+
+
+async def test_director_checks_in_between_rings(make_runtime):
+    rt = make_runtime()
+    _, run = await _run(rt, radius=3)
+    events = rt.store.list_events(run_id=run.id)
+    directs = [e for e in events if e.type == "super.direct.finished"]
+    assert len(directs) == 2  # after rings 1 and 2 (not after the last)
+    assert any(e.type == "director.note" for e in events)
 
 
 async def test_extension_run_reuses_style_and_continues_edges(make_runtime):
@@ -181,18 +203,6 @@ async def test_extension_run_reuses_style_and_continues_edges(make_runtime):
                 boundary += 1
                 assert t.edges[i].compatible_with(n.edges[(i + 3) % 6])
     assert boundary > 0
-
-
-async def test_record_then_replay_reproduces_board(make_runtime):
-    rt = make_runtime(fake_reject_rate=0.3)
-    rt.llm = RecordingClient(FakeClient(latency_s=0, reject_rate=0.3), rt.store)
-    world1, run1 = await _run(rt, "a pirate island", radius=2)
-    rt.llm = ReplayClient(rt.store)
-    world2, run2 = await _run(rt, "a pirate island", radius=2)
-    b1 = {h: (t.status, t.asset_id) for h, t in _tiles(rt, world1).items()}
-    b2 = {h: (t.status, t.asset_id) for h, t in _tiles(rt, world2).items()}
-    assert b1 == b2
-    assert run2.stats.cost_usd == 0
 
 
 async def test_cancel_marks_run_and_releases(make_runtime):
@@ -223,3 +233,25 @@ async def test_resume_after_crash(make_runtime, settings):
         t.status in (TileStatus.accepted, TileStatus.intentionally_empty, TileStatus.failed)
         for t in _tiles(rt2, world).values()
     )
+
+
+async def test_material_feedback_goes_to_the_material_artist_and_repaints(make_runtime):
+    class MaterialCritic(FakeClient):
+        sent = False
+
+        def _wave_review(self, p, rng):
+            out = super()._wave_review(p, rng)
+            if not self.sent and out["verdicts"]:
+                biome = p["candidates"][0]["directive"]["biome"]
+                out["verdicts"][0]["material_feedback"] = f"{biome}: more contrast between patches"
+                MaterialCritic.sent = True
+            return out
+
+    rt = make_runtime(llm=MaterialCritic(latency_s=0, reject_rate=0))
+    world, run = await _run(rt, radius=2)
+    assert run.status == RunStatus.completed, run.error
+    events = rt.store.list_events(run_id=run.id)
+    rev = [e for e in events if e.type == "library.material_revise.finished"]
+    assert rev and rev[0].data["ok"] and rev[0].data["tiles_repainted"] >= 1
+    # the reviewer's material note did not reject the tile
+    assert run.stats.rejections_review == 0

@@ -22,8 +22,7 @@ class Settings(BaseSettings):
     data_dir: Path = REPO_ROOT / "data"
 
     # ---- LLM
-    llm: Literal["openai", "replay", "fake"] = "openai"  # fake = test double only
-    record_llm: bool = True  # store every real LLM response for later replay
+    llm: Literal["openai", "fake"] = "openai"  # fake = scripted test double (pytest only)
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     openai_base_url: str | None = Field(default=None, validation_alias="OPENAI_BASE_URL")
     super_model: str = "gpt-5"

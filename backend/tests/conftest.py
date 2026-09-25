@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from hexworld.agents.fake import FakeClient
+from hexworld.agents.kit import fake_model_factory
 from hexworld.art.backend import ProceduralStubBackend
 from hexworld.config import Settings
 from hexworld.orchestrator.runtime import Runtime
@@ -22,10 +23,11 @@ def make_runtime(settings):
 
     def _make(llm=None, image=None, store=None, **overrides) -> Runtime:
         s = settings.model_copy(update=overrides)
+        brain = llm or FakeClient(latency_s=0, reject_rate=s.fake_reject_rate)  # scripted agent brain
         rt = Runtime(
             s,
             store=store or Store(s.data_dir),
-            llm=llm or FakeClient(latency_s=0, reject_rate=s.fake_reject_rate),
+            model_factory=fake_model_factory(brain, latency_s=brain.latency_s),
             image=image or ProceduralStubBackend(latency_s=0),
         )
         created.append(rt)

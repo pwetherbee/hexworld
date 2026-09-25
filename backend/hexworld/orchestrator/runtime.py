@@ -5,10 +5,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from collections.abc import Callable
 from typing import Any
 
+from google.adk.models.base_llm import BaseLlm
+
 from hexworld.agents.fake import FakeClient
-from hexworld.agents.llm import LLMClient, OpenAIClient, RecordingClient, ReplayClient
+from hexworld.agents.kit import fake_model_factory, openai_model_factory
+from hexworld.agents.llm import Role
 from hexworld.art.backend import (
     ComfyUIBackend,
     FallbackImageBackend,
@@ -28,23 +32,12 @@ class RunConflict(Exception):
     pass
 
 
-def build_llm(settings: Settings, store: Store) -> LLMClient:
+def build_models(settings: Settings) -> Callable[[Role], BaseLlm]:
     if settings.llm == "fake":
-        return FakeClient(reject_rate=settings.fake_reject_rate)
-    real = OpenAIClient(
-        api_key=settings.openai_api_key,
-        base_url=settings.openai_base_url,
-        super_model=settings.super_model,
-        tile_model=settings.tile_model,
-        super_reasoning=settings.super_reasoning,
-        tile_reasoning=settings.tile_reasoning,
-        artist_model=settings.artist_model,
-        artist_reasoning=settings.artist_reasoning,
-        timeout_s=settings.llm_timeout_s,
-    )
-    if settings.llm == "replay":
-        return ReplayClient(store, fallback=RecordingClient(real, store))
-    return RecordingClient(real, store) if settings.record_llm else real
+        return fake_model_factory(FakeClient(reject_rate=settings.fake_reject_rate))
+    if not settings.openai_api_key:
+        raise RuntimeError("OPENAI_API_KEY is not set (put it in the repo-root .env)")
+    return openai_model_factory(settings)
 
 
 def build_image(settings: Settings) -> ImageBackend:
@@ -77,14 +70,15 @@ class Runtime:
         settings: Settings,
         *,
         store: Store | None = None,
-        llm: LLMClient | None = None,
+        model_factory: Callable[[Role], BaseLlm] | None = None,
         image: ImageBackend | None = None,
     ):
         self.settings = settings
         self.store = store or Store(settings.data_dir)
         self.bus = EventBus()
         self.store.add_listener(self.bus.publish)
-        self.llm = llm or build_llm(settings, self.store)
+        self.model_factory = model_factory or build_models(settings)
+        self.llm_name = "fake" if settings.llm == "fake" or model_factory else f"adk+{settings.llm}"
         self.image = image or build_image(settings)
         self.gpu_sem = asyncio.Semaphore(settings.image_concurrency)
         self.tasks: dict[str, asyncio.Task[None]] = {}
@@ -181,9 +175,9 @@ class Runtime:
 
     async def backend_status(self) -> dict[str, Any]:
         return {
-            "llm": self.llm.name,
-            "super_model": self.llm.model_for("super"),
-            "tile_model": self.llm.model_for("tile"),
+            "llm": self.llm_name,
+            "super_model": self.model_factory("super").model,
+            "tile_model": self.model_factory("tile").model,
             "image": self.image.name,
             "image_healthy": await self.image.health(),
         }
