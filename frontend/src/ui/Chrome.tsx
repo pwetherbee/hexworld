@@ -98,6 +98,7 @@ export function Controls() {
 /** Bottom-center: slim progress capsule while a run is active; hover to expand details. */
 export function RunCapsule() {
   const run = useStore((s) => (s.activeRunId ? s.runs[s.activeRunId] : null));
+  useStore((s) => s.libraryBusy); // re-render when artists start/finish
   const [lingering, setLingering] = useState<typeof run>(null);
   useEffect(() => {
     if (run) {
@@ -113,7 +114,14 @@ export function RunCapsule() {
   const st = latest.stats;
   const pct = st.tiles_planned ? st.tiles_accepted / st.tiles_planned : 0;
   const active = latest.status === "running" || latest.status === "pending";
-  const phase = !st.tiles_planned ? "planning" : active ? "building" : latest.status;
+  const busy = useStore.getState().libraryBusy;
+  const phase = !st.tiles_planned
+    ? "super is planning"
+    : busy > 0
+      ? `artists designing ${busy} asset${busy > 1 ? "s" : ""}`
+      : active
+        ? "building"
+        : latest.status;
   return (
     <div className={`capsule ${run ? "" : "leaving"}`} onClick={() => useStore.getState().openDrawer("run")}>
       <div className="capsule-row">

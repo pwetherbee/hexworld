@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     data_dir: Path = REPO_ROOT / "data"
 
     # ---- LLM
-    llm: Literal["fake", "openai", "replay"] = "fake"
+    llm: Literal["openai", "replay", "fake"] = "openai"  # fake = test double only
     record_llm: bool = True  # store every real LLM response for later replay
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     openai_base_url: str | None = Field(default=None, validation_alias="OPENAI_BASE_URL")
@@ -31,12 +31,15 @@ class Settings(BaseSettings):
     # Optional reasoning effort per role ("minimal"/"low"/"medium"/"high"); empty = model default.
     super_reasoning: str = "low"
     tile_reasoning: str = "minimal"
+    artist_model: str = ""  # material/sprite designers; "" = tile_model
+    artist_reasoning: str = "low"
     llm_timeout_s: float = 120.0
     fake_reject_rate: float = 0.15  # FakeClient: fraction of first attempts the fake super rejects
 
     # ---- images
-    image: Literal["stub", "comfyui", "openai"] = "stub"
-    image_fallback: Literal["none", "stub", "openai"] = "stub"
+    # "procedural" renders ground from the agent-designed material library ("stub" = old alias)
+    image: Literal["procedural", "stub", "comfyui", "openai"] = "procedural"
+    image_fallback: Literal["none", "procedural", "stub", "openai"] = "procedural"
     comfyui_url: str = "http://127.0.0.1:8188"
     comfyui_workflow_dir: Path = REPO_ROOT / "services" / "comfyui" / "workflows"
     comfyui_timeout_s: float = 180.0
@@ -55,7 +58,7 @@ class Settings(BaseSettings):
     # ---- server
     host: str = "127.0.0.1"
     port: int = 8000
-    world_radius: int = 12
+    world_radius: int = 64  # the grid is drawn infinite; this bounds where runs may start
 
 
 @lru_cache

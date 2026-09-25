@@ -238,6 +238,34 @@
         "radius"
       ]
     },
+    "DecalPixel": {
+      "properties": {
+        "dx": {
+          "type": "integer"
+        },
+        "dy": {
+          "type": "integer"
+        },
+        "tone": {
+          "enum": [
+            "outline",
+            "dark",
+            "base",
+            "light",
+            "hi",
+            "accent"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "dx",
+        "dy",
+        "tone"
+      ],
+      "title": "DecalPixel",
+      "type": "object"
+    },
     "Directive": {
       "description": "What the super asks of one tile agent (derived from a PlannedTile, plus retry feedback).",
       "properties": {
@@ -432,6 +460,126 @@
       "title": "Event",
       "type": "object"
     },
+    "MaterialSpec": {
+      "properties": {
+        "base_color": {
+          "description": "'#rrggbb'. A 5-step ramp (outline/dark/base/light/hi) is derived.",
+          "type": "string"
+        },
+        "accent_color": {
+          "description": "'#rrggbb' for accent decals (flowers, embers, sparkles).",
+          "type": "string"
+        },
+        "base_tone": {
+          "enum": [
+            "dark",
+            "base",
+            "light"
+          ],
+          "type": "string"
+        },
+        "liquid": {
+          "type": "boolean"
+        },
+        "rank": {
+          "description": "0-9 height rank; higher materials get a dark lip where they meet lower ones.",
+          "type": "integer"
+        },
+        "boundary": {
+          "description": "How this material's own border pixels look: foam (water), glow (lava), lip, none.",
+          "enum": [
+            "lip",
+            "foam",
+            "glow",
+            "none"
+          ],
+          "type": "string"
+        },
+        "ops": {
+          "description": "Pattern layers in paint order (<= 8).",
+          "items": {
+            "$ref": "#/$defs/PatternOp"
+          },
+          "type": "array"
+        },
+        "scatter": {
+          "description": "Ambient sprites for tiles of this material (<= 2 kinds).",
+          "items": {
+            "$ref": "#/$defs/ScatterSpec"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "base_color",
+        "accent_color",
+        "base_tone",
+        "liquid",
+        "rank",
+        "boundary",
+        "ops",
+        "scatter"
+      ],
+      "title": "MaterialSpec",
+      "type": "object"
+    },
+    "PatternOp": {
+      "description": "One layer of a material, evaluated in world pixel coordinates (seamless across tiles).\n\npatches:  smooth noise blobs, coverage = amount       stripes: waves at `angle`, period = scale\nspeckle:  random single pixels, density = amount      cells:   voronoi cracks/mortar, width ~ amount\ncellfill: fill a fraction (amount) of voronoi cells    bevel:   per-cell light/dark bevel (stones)\ndecals:   stamp `pixels` on a jittered grid (cell = scale, density = amount)",
+      "properties": {
+        "op": {
+          "enum": [
+            "patches",
+            "speckle",
+            "stripes",
+            "cells",
+            "cellfill",
+            "bevel",
+            "decals"
+          ],
+          "type": "string"
+        },
+        "tone": {
+          "enum": [
+            "outline",
+            "dark",
+            "base",
+            "light",
+            "hi",
+            "accent"
+          ],
+          "type": "string"
+        },
+        "scale": {
+          "description": "Feature size in pixels (2-16).",
+          "type": "number"
+        },
+        "amount": {
+          "description": "0-1 coverage/density/width, per op.",
+          "type": "number"
+        },
+        "angle": {
+          "description": "Degrees, for stripes.",
+          "type": "number"
+        },
+        "pixels": {
+          "description": "Decal pattern (for 'decals'); [] otherwise.",
+          "items": {
+            "$ref": "#/$defs/DecalPixel"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "op",
+        "tone",
+        "scale",
+        "amount",
+        "angle",
+        "pixels"
+      ],
+      "title": "PatternOp",
+      "type": "object"
+    },
     "PlannedTile": {
       "properties": {
         "q": {
@@ -487,6 +635,35 @@
         "duplicate"
       ],
       "title": "PlannedTile",
+      "type": "object"
+    },
+    "PropSpec": {
+      "description": "A sprite standing on the tile (tree, castle, campfire...). Rendered as its own layer.",
+      "properties": {
+        "kind": {
+          "description": "What it is, e.g. 'castle', 'pine tree', 'campfire', 'dark obelisk'.",
+          "type": "string"
+        },
+        "x": {
+          "description": "-0.6 (west) .. 0.6 (east), tile-local.",
+          "type": "number"
+        },
+        "y": {
+          "description": "-0.6 (north) .. 0.6 (south), tile-local.",
+          "type": "number"
+        },
+        "scale": {
+          "description": "0.6 .. 1.6 relative size.",
+          "type": "number"
+        }
+      },
+      "required": [
+        "kind",
+        "x",
+        "y",
+        "scale"
+      ],
+      "title": "PropSpec",
       "type": "object"
     },
     "Run": {
@@ -710,6 +887,24 @@
       "title": "RunStatus",
       "type": "string"
     },
+    "ScatterSpec": {
+      "properties": {
+        "kind": {
+          "description": "Sprite kind placed around this material, e.g. 'oak tree', 'boulder'.",
+          "type": "string"
+        },
+        "count": {
+          "description": "Sprites per tile of this material (0-8).",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "count"
+      ],
+      "title": "ScatterSpec",
+      "type": "object"
+    },
     "Scores": {
       "properties": {
         "style": {
@@ -736,6 +931,187 @@
         "directive_fit"
       ],
       "title": "Scores",
+      "type": "object"
+    },
+    "ShapeOp": {
+      "description": "One primitive on the sprite canvas (pixel units, origin top-left).\n\nrect: top-left (x, y), size (w, h) | ellipse: center (x, y), radii (w, h)\ntri: apex (x, y), base at y+h, half-width w | line: (x, y) -> (x+w, y+h) | pixel: (x, y)",
+      "properties": {
+        "op": {
+          "enum": [
+            "rect",
+            "ellipse",
+            "tri",
+            "line",
+            "pixel"
+          ],
+          "type": "string"
+        },
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "w": {
+          "type": "number"
+        },
+        "h": {
+          "type": "number"
+        },
+        "color": {
+          "description": "Index into the program's colors.",
+          "type": "integer"
+        },
+        "tone": {
+          "description": "Ramp step of that color.",
+          "enum": [
+            "outline",
+            "dark",
+            "base",
+            "light",
+            "hi"
+          ],
+          "type": "string"
+        },
+        "shade": {
+          "description": "Auto-shade: lighter upper-left, darker lower-right.",
+          "type": "boolean"
+        },
+        "frames": {
+          "description": "Frames this shape appears in; [] = every frame.",
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "op",
+        "x",
+        "y",
+        "w",
+        "h",
+        "color",
+        "tone",
+        "shade",
+        "frames"
+      ],
+      "title": "ShapeOp",
+      "type": "object"
+    },
+    "SpriteEntry": {
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "program": {
+          "$ref": "#/$defs/SpriteProgram"
+        },
+        "asset_id": {
+          "type": "string"
+        },
+        "px_w": {
+          "type": "integer"
+        },
+        "px_h": {
+          "type": "integer"
+        },
+        "frames": {
+          "type": "integer"
+        },
+        "fps": {
+          "type": "number"
+        },
+        "motion": {
+          "enum": [
+            "none",
+            "sway",
+            "bob",
+            "flicker",
+            "pulse"
+          ],
+          "type": "string"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "kind",
+        "program",
+        "asset_id",
+        "px_w",
+        "px_h",
+        "frames",
+        "fps",
+        "motion",
+        "run_id"
+      ],
+      "title": "SpriteEntry",
+      "type": "object"
+    },
+    "SpriteProgram": {
+      "properties": {
+        "width": {
+          "description": "Canvas width in pixels (4-32). Match the ground's pixel scale.",
+          "type": "integer"
+        },
+        "height": {
+          "description": "Canvas height in pixels (4-32).",
+          "type": "integer"
+        },
+        "colors": {
+          "description": "1-6 base colors '#rrggbb'; each gets a ramp (dark/base/light/hi).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "shapes": {
+          "description": "Painted in order (later shapes on top). <= 80.",
+          "items": {
+            "$ref": "#/$defs/ShapeOp"
+          },
+          "type": "array"
+        },
+        "frames": {
+          "description": "Animation frames (1-4).",
+          "type": "integer"
+        },
+        "fps": {
+          "description": "Frame rate if frames > 1.",
+          "type": "number"
+        },
+        "motion": {
+          "description": "Procedural motion applied by the renderer.",
+          "enum": [
+            "none",
+            "sway",
+            "bob",
+            "flicker",
+            "pulse"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "width",
+        "height",
+        "colors",
+        "shapes",
+        "frames",
+        "fps",
+        "motion"
+      ],
+      "title": "SpriteProgram",
       "type": "object"
     },
     "StartRun": {
@@ -888,6 +1264,27 @@
           ],
           "default": null
         },
+        "ground_asset_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "layers": {
+          "items": {
+            "$ref": "#/$defs/TileLayer"
+          },
+          "type": "array"
+        },
+        "relief": {
+          "default": 1,
+          "type": "integer"
+        },
         "preview_asset_id": {
           "anyOf": [
             {
@@ -982,6 +1379,9 @@
         "attributes",
         "edges",
         "asset_id",
+        "ground_asset_id",
+        "layers",
+        "relief",
         "preview_asset_id",
         "side_color",
         "art_prompt",
@@ -1017,6 +1417,16 @@
         },
         "negative_prompt": {
           "type": "string"
+        },
+        "relief": {
+          "default": 1,
+          "type": "integer"
+        },
+        "props": {
+          "items": {
+            "$ref": "#/$defs/PropSpec"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -1025,7 +1435,9 @@
         "attributes",
         "edges",
         "art_prompt",
-        "negative_prompt"
+        "negative_prompt",
+        "relief",
+        "props"
       ],
       "title": "TileDesign",
       "type": "object"
@@ -1047,6 +1459,79 @@
         "attempts"
       ],
       "title": "TileDetail",
+      "type": "object"
+    },
+    "TileLayer": {
+      "description": "One visual layer of a tile. The ground layer is the seamless top-face texture. Sprite layers\nstand on it as upright billboards: side-view pixel art, optionally a horizontal strip of animation\nframes, plus a procedural motion the renderer applies.",
+      "properties": {
+        "kind": {
+          "enum": [
+            "ground",
+            "sprite"
+          ],
+          "type": "string"
+        },
+        "asset_id": {
+          "type": "string"
+        },
+        "label": {
+          "default": "",
+          "type": "string"
+        },
+        "x": {
+          "default": 0.0,
+          "type": "number"
+        },
+        "y": {
+          "default": 0.0,
+          "type": "number"
+        },
+        "width": {
+          "default": 1.0,
+          "type": "number"
+        },
+        "px_w": {
+          "default": 0,
+          "type": "integer"
+        },
+        "px_h": {
+          "default": 0,
+          "type": "integer"
+        },
+        "frames": {
+          "default": 1,
+          "type": "integer"
+        },
+        "fps": {
+          "default": 0.0,
+          "type": "number"
+        },
+        "motion": {
+          "default": "none",
+          "enum": [
+            "none",
+            "sway",
+            "bob",
+            "flicker",
+            "pulse"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "asset_id",
+        "label",
+        "x",
+        "y",
+        "width",
+        "px_w",
+        "px_h",
+        "frames",
+        "fps",
+        "motion"
+      ],
+      "title": "TileLayer",
       "type": "object"
     },
     "TileStatus": {
@@ -1135,6 +1620,18 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "materials": {
+          "additionalProperties": {
+            "$ref": "#/$defs/MaterialSpec"
+          },
+          "type": "object"
+        },
+        "sprites": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SpriteEntry"
+          },
+          "type": "object"
         }
       },
       "required": [
@@ -1145,7 +1642,9 @@
         "spec",
         "style",
         "tile_attributes",
-        "anchor_asset_ids"
+        "anchor_asset_ids",
+        "materials",
+        "sprites"
       ],
       "title": "World",
       "type": "object"

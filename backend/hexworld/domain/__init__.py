@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from hexworld.domain.art import MaterialSpec, SpriteEntry
 from hexworld.hex import Hex
 
 HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -79,8 +80,9 @@ class StyleGuide(BaseModel):
                 raise ValueError(f"bad palette color {c!r}")
             if c.lower() not in cleaned:
                 cleaned.append(c.lower())
-        if not 4 <= len(cleaned) <= 48:
-            raise ValueError("palette must have 4-48 distinct colors")
+        if len(cleaned) < 4:
+            raise ValueError("palette needs at least 4 distinct colors")
+        cleaned = cleaned[:128]  # grows as the session library adds materials
         return cleaned
 
     @field_validator("tile_px")
@@ -191,34 +193,6 @@ def compile_attribute_schema(attrs: list[AttributeDef]) -> dict[str, Any]:
     }
 
 
-DEFAULT_ATTRIBUTES: list[AttributeDef] = [
-    AttributeDef(
-        name="elevation",
-        type="integer",
-        description="0 = sea level, 5 = high peaks",
-        enum_values=[],
-        minimum=0,
-        maximum=5,
-    ),
-    AttributeDef(
-        name="passable",
-        type="boolean",
-        description="Can units walk here?",
-        enum_values=[],
-        minimum=None,
-        maximum=None,
-    ),
-    AttributeDef(
-        name="movement_cost",
-        type="integer",
-        description="Movement points to enter",
-        enum_values=[],
-        minimum=1,
-        maximum=5,
-    ),
-]
-
-
 # --------------------------------------------------------------------------- plan
 
 
@@ -301,6 +275,15 @@ class Directive(BaseModel):
 # --------------------------------------------------------------------------- tile agent output
 
 
+class PropSpec(BaseModel):
+    """A sprite standing on the tile (tree, castle, campfire...). Rendered as its own layer."""
+
+    kind: str = Field(description="What it is, e.g. 'castle', 'pine tree', 'campfire', 'dark obelisk'.")
+    x: float = Field(description="-0.6 (west) .. 0.6 (east), tile-local.")
+    y: float = Field(description="-0.6 (north) .. 0.6 (south), tile-local.")
+    scale: float = Field(description="0.6 .. 1.6 relative size.")
+
+
 class TileDesign(BaseModel):
     biome: str
     summary: str
@@ -308,6 +291,8 @@ class TileDesign(BaseModel):
     edges: list[EdgeSpec]
     art_prompt: str
     negative_prompt: str
+    relief: int = 1  # visual only: 0 flat/liquid .. 3 mountainous (prism height), not a game attribute
+    props: list[PropSpec] = Field(default_factory=list)
 
     @field_validator("edges")
     @classmethod
@@ -343,6 +328,24 @@ class AnchorPick(BaseModel):
 # --------------------------------------------------------------------------- persisted entities
 
 
+class TileLayer(BaseModel):
+    """One visual layer of a tile. The ground layer is the seamless top-face texture. Sprite layers
+    stand on it as upright billboards: side-view pixel art, optionally a horizontal strip of animation
+    frames, plus a procedural motion the renderer applies."""
+
+    kind: Literal["ground", "sprite"]
+    asset_id: str
+    label: str = ""
+    x: float = 0.0  # tile-local, in hex circumradius units (east +)
+    y: float = 0.0  # (south +)
+    width: float = 1.0  # world width in hex circumradius units
+    px_w: int = 0  # one frame's pixel size
+    px_h: int = 0
+    frames: int = 1
+    fps: float = 0.0
+    motion: Literal["none", "sway", "bob", "flicker", "pulse"] = "none"
+
+
 class Tile(BaseModel):
     q: int
     r: int
@@ -352,7 +355,10 @@ class Tile(BaseModel):
     summary: str | None = None
     attributes: dict[str, Any] = Field(default_factory=dict)
     edges: list[EdgeSpec] | None = None
-    asset_id: str | None = None
+    asset_id: str | None = None  # flattened preview (ground + sprites), used for thumbnails/review
+    ground_asset_id: str | None = None  # seamless ground layer: seams, inpainting context
+    layers: list[TileLayer] = Field(default_factory=list)
+    relief: int = 1
     preview_asset_id: str | None = None  # candidate under review (shown ghosted in the UI)
     side_color: str | None = None
     art_prompt: str | None = None  # kept so neighbors' tile agents can continue this tile's visuals
@@ -380,6 +386,9 @@ class World(BaseModel):
     style: StyleGuide | None = None
     tile_attributes: list[AttributeDef] = Field(default_factory=list)
     anchor_asset_ids: list[str] = Field(default_factory=list)
+    # Session library, filled on demand by the material/sprite sub-agents and reused by later tiles.
+    materials: dict[str, MaterialSpec] = Field(default_factory=dict)
+    sprites: dict[str, SpriteEntry] = Field(default_factory=dict)
 
 
 class RunOptions(BaseModel):

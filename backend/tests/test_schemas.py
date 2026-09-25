@@ -122,7 +122,7 @@ async def test_normalize_design_repairs_edges_and_clamps():
         summary="s",
         art_prompt="a",
         negative_prompt="",
-        attributes={"elevation": 99, "passable": True},
+        attributes={"danger": 99, "loot": "none"},
         edges=[EdgeSpec(terrain=vocab[0], connectors=["bogus"]) for _ in range(6)],
     )
     want = EdgeSpec(terrain=vocab[1], connectors=[])
@@ -130,8 +130,8 @@ async def test_normalize_design_repairs_edges_and_clamps():
     assert fixed.biome in vocab
     assert fixed.edges[2] == want and report["repaired_edges"] == [2]
     assert all(e.connectors == [] for e in fixed.edges)
-    assert fixed.attributes["elevation"] == 5 and "elevation" in report["clamped"]
-    assert "movement_cost" in report["defaulted"]
+    assert fixed.attributes["danger"] == 5 and "danger" in report["clamped"]
+    assert "encounter" in report["defaulted"]
 
 
 def test_strict_schema_roundtrip_simple():

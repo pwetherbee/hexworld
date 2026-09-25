@@ -55,6 +55,22 @@ def nearest_indices(rgb: np.ndarray, pal: np.ndarray) -> np.ndarray:
     return dist.argmin(axis=1).reshape(rgb.shape[:-1]).astype(np.int16)
 
 
+def crisp_tile(src_png: bytes, tile_px: int) -> PixelTile:
+    """Already-exact pixel art (procedural renderer, integer-upscaled): sample block centres and
+    apply the hex mask. No palette re-quantization, so output is independent of palette changes."""
+    img = Image.open(io.BytesIO(src_png)).convert("RGBA")
+    k = max(1, img.width // tile_px)
+    arr = np.asarray(img, dtype=np.uint8)[k // 2 :: k, k // 2 :: k][:tile_px, :tile_px].copy()
+    mask = hex_mask(tile_px)
+    arr[~mask] = 0
+    arr[mask, 3] = 255
+    flat = arr[..., :3].reshape(-1, 3)
+    _, idx = np.unique(flat, axis=0, return_inverse=True)
+    indices = idx.reshape(tile_px, tile_px).astype(np.int16)
+    indices[~mask] = -1
+    return _finish(arr, indices, mask, "crisp")
+
+
 def pixelize(src_png: bytes, palette: list[str], tile_px: int, *, oversample: int = 4) -> PixelTile:
     """Generator image (any size, roughly square, hex filling the frame) -> canonical pixel tile.
 
@@ -145,7 +161,7 @@ def _shrunk_mask(px: int, f: float) -> np.ndarray:
 
 
 def edge_strip(
-    rgba: np.ndarray, edge: int, n: int = 16, insets: tuple[float, ...] = (1.5, 2.5)
+    rgba: np.ndarray, edge: int, n: int = 16, insets: tuple[float, ...] = (0.6, 1.0)
 ) -> np.ndarray:
     """(n, 3) float RGB samples along edge `edge`, from the corner at angle dir-30 to dir+30,
     each averaged over a few inset depths. NaN where transparent."""

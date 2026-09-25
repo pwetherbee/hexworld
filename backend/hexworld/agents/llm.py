@@ -24,7 +24,7 @@ from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait
 from hexworld.domain import RunStats
 from hexworld.telemetry import Span, Tracer
 
-Role = Literal["super", "tile"]
+Role = Literal["super", "tile", "artist"]
 T = TypeVar("T", bound=BaseModel)
 
 
@@ -136,11 +136,13 @@ PRICING: dict[str, tuple[float, float, float]] = {
 }
 
 
+UNKNOWN_MODEL_PRICING = (2.50, 0.25, 15.00)
+
+
 def estimate_cost(model: str, input_tokens: int, cached: int, output_tokens: int) -> float:
     match = max((m for m in PRICING if model.startswith(m)), key=len, default=None)
-    if match is None:
-        return 0.0
-    pin, pcached, pout = PRICING[match]
+    # Unknown (newer) models: a deliberately conservative estimate so per-run cost caps still bite.
+    pin, pcached, pout = PRICING[match] if match else UNKNOWN_MODEL_PRICING
     return ((input_tokens - cached) * pin + cached * pcached + output_tokens * pout) / 1_000_000
 
 
@@ -159,6 +161,8 @@ class OpenAIClient:
         tile_model: str,
         super_reasoning: str = "",
         tile_reasoning: str = "",
+        artist_model: str = "",
+        artist_reasoning: str = "",
         timeout_s: float = 120.0,
     ):
         from openai import AsyncOpenAI
@@ -166,8 +170,12 @@ class OpenAIClient:
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is not set (required for HEXWORLD_LLM=openai)")
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout_s, max_retries=0)
-        self._models = {"super": super_model, "tile": tile_model}
-        self._effort = {"super": super_reasoning, "tile": tile_reasoning}
+        self._models = {"super": super_model, "tile": tile_model, "artist": artist_model or tile_model}
+        self._effort = {
+            "super": super_reasoning,
+            "tile": tile_reasoning,
+            "artist": artist_reasoning or tile_reasoning,
+        }
 
     def model_for(self, role: Role) -> str:
         return self._models[role]

@@ -48,8 +48,40 @@ def tile_design_schema(world: World) -> dict[str, Any]:
             },
             "art_prompt": {"type": "string"},
             "negative_prompt": {"type": "string"},
+            "relief": {
+                "type": "integer",
+                "description": "Visual height of the tile (render only): 0 water/lava/flat, 1 plains, 2 hills/forest, 3 mountains.",
+            },
+            "props": {
+                "type": "array",
+                "description": "0-3 sprites standing on the tile (buildings, landmarks, creatures, special trees). "
+                "Ambient vegetation/rocks are added automatically from the biome; do not list them.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "description": "e.g. 'dark castle', 'campfire', 'crystal spire'",
+                        },
+                        "x": {"type": "number", "description": "-0.6 west .. 0.6 east"},
+                        "y": {"type": "number", "description": "-0.6 north .. 0.6 south"},
+                        "scale": {"type": "number", "description": "0.6 .. 1.6"},
+                    },
+                    "required": ["kind", "x", "y", "scale"],
+                    "additionalProperties": False,
+                },
+            },
         },
-        "required": ["biome", "summary", "attributes", "edges", "art_prompt", "negative_prompt"],
+        "required": [
+            "biome",
+            "summary",
+            "attributes",
+            "edges",
+            "art_prompt",
+            "negative_prompt",
+            "relief",
+            "props",
+        ],
         "additionalProperties": False,
     }
 
@@ -116,7 +148,21 @@ def normalize_design(
             v = [x for x in (v or []) if x in a.enum_values]
         attrs[a.name] = v
 
-    fixed = design.model_copy(update={"biome": biome, "edges": edges, "attributes": attrs})
+    props = [
+        p.model_copy(
+            update={
+                "x": min(0.6, max(-0.6, p.x)),
+                "y": min(0.6, max(-0.6, p.y)),
+                "scale": min(1.6, max(0.6, p.scale)),
+            }
+        )
+        for p in design.props[:3]
+        if p.kind.strip()
+    ]
+    relief = min(3, max(0, design.relief))
+    fixed = design.model_copy(
+        update={"biome": biome, "edges": edges, "attributes": attrs, "props": props, "relief": relief}
+    )
     return fixed, report
 
 
@@ -142,6 +188,7 @@ async def design_tile(
     context_png: bytes | None,
     anchor_png: bytes | None,
     parent: Span | None,
+    sprite_library: list[str] | None = None,
 ) -> TileDesign:
     assert world.spec is not None and world.style is not None
     payload = {
@@ -152,6 +199,7 @@ async def design_tile(
         # per-tile
         "directive": directive.model_dump(mode="json"),
         "neighbors": neighbors,
+        "sprite_library": sprite_library or [],
     }
     images: list[ImagePart] = []
     if anchor_png:

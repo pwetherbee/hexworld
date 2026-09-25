@@ -1,5 +1,8 @@
 """Deterministic offline LLM. Produces plausible, schema-valid outputs for every task so the
-whole system (scheduler, validators, review loop, UI) can be exercised without API cost."""
+whole system (scheduler, validators, review loop, UI) can be exercised without API cost.
+
+It is NOT an agent: it maps prompts to hand-made theme/genre presets by keyword. Real prompt
+understanding needs HEXWORLD_LLM=openai."""
 
 from __future__ import annotations
 
@@ -11,7 +14,7 @@ import random
 from typing import Any
 
 from hexworld.agents.llm import LLMRequest, LLMResult, Role
-from hexworld.agents.themes import THEMES, palette_for, pick_theme
+from hexworld.agents.themes import THEMES, palette_for, pick_genre, pick_theme
 from hexworld.hex import Hex
 
 
@@ -51,20 +54,34 @@ class FakeClient:
         existing = p.get("existing_world")
         prompt: str = p["user_prompt"]
         origin = Hex(p["origin"]["q"], p["origin"]["r"])
+        theme_name = pick_theme(prompt, default="")
         if existing:
-            world = existing["world"]
-            style = existing["style"]
+            # Extending: keep the world's style/attributes, but the NEW prompt decides this region.
+            world = json.loads(json.dumps(existing["world"]))
+            style = json.loads(json.dumps(existing["style"]))
             attrs = existing["tile_attributes"]
-            terrains = world["terrain_vocabulary"]
-            theme = THEMES.get(pick_theme(prompt), THEMES["temperate"])
+            theme = THEMES.get(theme_name) or THEMES["temperate"]
+            if theme_name:
+                terrains = list(theme["terrains"])
+                for t in terrains:
+                    if t not in world["terrain_vocabulary"]:
+                        world["terrain_vocabulary"].append(t)
+                for c in theme["connectors"]:
+                    if c not in world["connector_vocabulary"]:
+                        world["connector_vocabulary"].append(c)
+                extra = palette_for(terrains, theme["connectors"])
+                style["palette"] = style["palette"] + [c for c in extra if c not in style["palette"]]
+            else:
+                terrains = world["terrain_vocabulary"]
         else:
-            theme_name = pick_theme(prompt)
+            theme_name = theme_name or "temperate"
             theme = THEMES[theme_name]
             terrains = list(theme["terrains"])
+            genre, attrs = pick_genre(prompt)
             title = prompt.strip().split(".")[0][:48] or "Untitled Realm"
             world = {
                 "title": title.title(),
-                "genre": theme["genre"],
+                "genre": genre,
                 "theme": f"{theme_name} world: {prompt[:120]}",
                 "lore": f"A {theme_name} land shaped by the words: '{prompt[:100]}'. Explorers set out from the "
                 "central tile to chart what lies beyond.",
@@ -74,46 +91,12 @@ class FakeClient:
             }
             style = {
                 "palette": palette_for(terrains, theme["connectors"]),
-                "tile_px": 48,
-                "view": "top-down orthographic",
+                "tile_px": 32,
+                "view": "top-down ground, props as side-view sprites",
                 "light_direction": "from the top-left",
-                "outline": "no outlines on terrain, 1px dark outline on props",
-                "style_keywords": "16-bit SNES era pixel art, crisp pixels, limited palette, soft dithering",
+                "outline": "1px dark outline on props and raised materials",
+                "style_keywords": "Terraria-style pixel art, chunky crisp pixels, bold outlines, vibrant 4-step shading ramps, no dithering",
             }
-            attrs = [
-                {
-                    "name": "elevation",
-                    "type": "integer",
-                    "description": "0 sea level .. 5 peaks",
-                    "enum_values": [],
-                    "minimum": 0,
-                    "maximum": 5,
-                },
-                {
-                    "name": "passable",
-                    "type": "boolean",
-                    "description": "Can units walk here?",
-                    "enum_values": [],
-                    "minimum": None,
-                    "maximum": None,
-                },
-                {
-                    "name": "movement_cost",
-                    "type": "integer",
-                    "description": "Movement points to enter",
-                    "enum_values": [],
-                    "minimum": 1,
-                    "maximum": 5,
-                },
-                {
-                    "name": "resource",
-                    "type": "enum",
-                    "description": "Harvestable resource",
-                    "enum_values": ["none", "wood", "stone", "food", "gold"],
-                    "minimum": None,
-                    "maximum": None,
-                },
-            ]
 
         seed = rng.random() * 1000
         radius = max((c["ring"] for c in p["candidate_coords"]), default=1) or 1
@@ -209,6 +192,25 @@ class FakeClient:
                 attrs[name] = ""
         feats = ", ".join(d["features"]) or "natural detail"
         fb = f" (revised: {d['feedback'][-1][:60]})" if d.get("feedback") else ""
+        relief = (
+            0
+            if any(k in biome for k in ("water", "lava", "sea"))
+            else 2
+            if any(k in biome for k in ("rock", "forest", "hill", "mountain"))
+            else 1
+        )
+        props = []
+        for k, feat in enumerate(d["features"][:2]):
+            ang = rng.random() * math.tau
+            rad = 0.1 + rng.random() * 0.25
+            props.append(
+                {
+                    "kind": feat,
+                    "x": round(math.cos(ang) * rad, 2),
+                    "y": round(math.sin(ang) * rad + 0.1 * k, 2),
+                    "scale": 1.0,
+                }
+            )
         return {
             "biome": biome,
             "summary": f"{biome.replace('_', ' ').title()} with {feats}{fb}",
@@ -216,6 +218,8 @@ class FakeClient:
             "edges": edges,
             "art_prompt": f"{biome.replace('_', ' ')} ground seen from above with {feats}",
             "negative_prompt": "text, people, ui",
+            "relief": relief,
+            "props": props,
         }
 
     # ------------------------------------------------------------------ review / anchor
@@ -241,6 +245,66 @@ class FakeClient:
                 }
             )
         return {"verdicts": verdicts}
+
+    # Test-double artists: minimal, valid programs so the pipeline can be exercised in tests.
+    def _material_design(self, p: dict[str, Any], rng: random.Random) -> dict[str, Any]:
+        from hexworld.agents.themes import base_color
+
+        liquid = any(k in p["material"] for k in ("water", "lava", "sea", "ocean"))
+        return {
+            "base_color": base_color(p["material"]),
+            "accent_color": "#ffd35a",
+            "base_tone": "base",
+            "liquid": liquid,
+            "rank": 1 if liquid else 4,
+            "boundary": "foam" if liquid else "lip",
+            "ops": [
+                {"op": "patches", "tone": "light", "scale": 7, "amount": 0.35, "angle": 0, "pixels": []},
+                {
+                    "op": "decals",
+                    "tone": "dark",
+                    "scale": 6,
+                    "amount": 0.4,
+                    "angle": 0,
+                    "pixels": [{"dx": 0, "dy": 0, "tone": "dark"}, {"dx": 1, "dy": 0, "tone": "light"}],
+                },
+            ],
+            "scatter": [] if (liquid or p["is_connector"]) else [{"kind": "shrub", "count": 1}],
+        }
+
+    def _sprite_design(self, p: dict[str, Any], rng: random.Random) -> dict[str, Any]:
+        return {
+            "width": 10,
+            "height": 12,
+            "colors": ["#8b5a2b", "#3f8f3a"],
+            "frames": 1,
+            "fps": 0,
+            "motion": "sway",
+            "shapes": [
+                {
+                    "op": "rect",
+                    "x": 4,
+                    "y": 7,
+                    "w": 2,
+                    "h": 5,
+                    "color": 0,
+                    "tone": "base",
+                    "shade": False,
+                    "frames": [],
+                },
+                {
+                    "op": "ellipse",
+                    "x": 5,
+                    "y": 4.5,
+                    "w": 4.5,
+                    "h": 4,
+                    "color": 1,
+                    "tone": "base",
+                    "shade": True,
+                    "frames": [],
+                },
+            ],
+        }
 
     def _anchor_pick(self, p: dict[str, Any], rng: random.Random) -> dict[str, Any]:
         return {"best_label": 1 + rng.randrange(p["num_candidates"]), "reason": "Cleanest read of the biome."}

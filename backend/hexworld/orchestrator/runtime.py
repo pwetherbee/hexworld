@@ -14,7 +14,7 @@ from hexworld.art.backend import (
     FallbackImageBackend,
     ImageBackend,
     OpenAIImageBackend,
-    ProceduralStubBackend,
+    ProceduralBackend,
 )
 from hexworld.config import Settings
 from hexworld.domain import Coord, Run, RunOptions, RunStatus, World
@@ -38,6 +38,8 @@ def build_llm(settings: Settings, store: Store) -> LLMClient:
         tile_model=settings.tile_model,
         super_reasoning=settings.super_reasoning,
         tile_reasoning=settings.tile_reasoning,
+        artist_model=settings.artist_model,
+        artist_reasoning=settings.artist_reasoning,
         timeout_s=settings.llm_timeout_s,
     )
     if settings.llm == "replay":
@@ -47,8 +49,8 @@ def build_llm(settings: Settings, store: Store) -> LLMClient:
 
 def build_image(settings: Settings) -> ImageBackend:
     def make(kind: str) -> ImageBackend:
-        if kind == "stub":
-            return ProceduralStubBackend()
+        if kind in ("procedural", "stub"):
+            return ProceduralBackend()
         if kind == "comfyui":
             return ComfyUIBackend(
                 settings.comfyui_url, settings.comfyui_workflow_dir, settings.comfyui_timeout_s
@@ -60,7 +62,11 @@ def build_image(settings: Settings) -> ImageBackend:
         raise ValueError(kind)
 
     primary = make(settings.image)
-    if settings.image_fallback == "none" or settings.image_fallback == settings.image:
+
+    def canon(k: str) -> str:
+        return "procedural" if k == "stub" else k
+
+    if settings.image_fallback == "none" or canon(settings.image_fallback) == canon(settings.image):
         return primary
     return FallbackImageBackend(primary, make(settings.image_fallback))
 

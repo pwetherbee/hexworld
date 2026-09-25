@@ -8,6 +8,7 @@ import { buildSpans, spanColor, spanLabel } from "./spans";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "run", label: "Run" },
+  { id: "library", label: "Library" },
   { id: "timeline", label: "Timeline" },
   { id: "tile", label: "Tile" },
   { id: "log", label: "Log" },
@@ -31,6 +32,7 @@ export function Inspector() {
       </nav>
       <div className="tab-body">
         {open && tab === "run" && <RunPanel />}
+        {open && tab === "library" && <LibraryPanel />}
         {open && tab === "timeline" && <Timeline />}
         {open && tab === "tile" && <TilePanel />}
         {open && tab === "log" && <EventLog />}
@@ -193,6 +195,58 @@ function RunCard({ run }: { run: Run }) {
 }
 
 const fmt = (n: number) => (n >= 10000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
+
+// ------------------------------------------------------------------ library
+
+/** The session library: every material and sprite the artist agents designed for this world. */
+function LibraryPanel() {
+  const sprites = useStore((s) => s.libSprites);
+  const materials = useStore((s) => s.libMaterials);
+  const sEntries = Object.values(sprites);
+  const mEntries = Object.entries(materials);
+  if (!sEntries.length && !mEntries.length)
+    return <div className="hint">Empty. Artist agents design materials and sprites on demand as the world is built.</div>;
+  return (
+    <div className="stack">
+      <section>
+        <h4>Sprites ({sEntries.length})</h4>
+        <div className="lib-grid">
+          {sEntries.map((e) => (
+            <figure key={e.kind} className="lib-item" title={`${e.kind} · ${e.px_w}x${e.px_h}${e.frames > 1 ? ` · ${e.frames} frames` : ""}`}>
+              <div
+                className="lib-sprite"
+                style={{
+                  backgroundImage: `url(${assetUrl(e.asset_id)})`,
+                  width: e.px_w * 3,
+                  height: e.px_h * 3,
+                  backgroundSize: `${e.px_w * e.frames * 3}px ${e.px_h * 3}px`,
+                  animation: e.frames > 1 ? `lib-frames-${e.frames} ${0.5 * e.frames}s steps(${e.frames}) infinite` : undefined,
+                  ["--strip" as string]: `-${e.px_w * e.frames * 3}px`,
+                }}
+              />
+              <figcaption>{e.kind}</figcaption>
+            </figure>
+          ))}
+        </div>
+      </section>
+      <section>
+        <h4>Materials ({mEntries.length})</h4>
+        <div className="lib-mats">
+          {mEntries.map(([name, m]) => (
+            <div key={name} className="lib-mat" title={m.ops.map((o) => o.op).join(" · ")}>
+              <span className="swatch" style={{ background: m.base_color, boxShadow: `inset -6px -6px 0 ${m.accent_color}` }} />
+              <span className="mono">{name}</span>
+              <span className="muted small">
+                {m.liquid ? "liquid · " : ""}
+                {m.ops.length} ops{m.scatter.length ? ` · ${m.scatter.map((s) => s.kind).join(", ")}` : ""}
+              </span>
+            </div>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
 
 // ------------------------------------------------------------------ timeline
 

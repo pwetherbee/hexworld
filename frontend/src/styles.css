@@ -233,3 +233,16 @@ section p, .disclosure p { margin: 4px 0; line-height: 1.5; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
+
+/* library */
+.lib-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); gap: 8px; }
+.lib-item { margin: 0; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 4px; padding: 8px 4px 6px; border-radius: 10px; background: rgba(255, 255, 255, 0.025); border: 1px solid var(--line); min-height: 92px; animation: rise-in 0.4s var(--spring) both; }
+.lib-sprite { image-rendering: pixelated; background-repeat: no-repeat; background-position: 0 0; }
+.lib-item figcaption { font-size: 10px; color: var(--muted); text-align: center; line-height: 1.2; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@keyframes lib-frames-2 { to { background-position-x: var(--strip); } }
+@keyframes lib-frames-3 { to { background-position-x: var(--strip); } }
+@keyframes lib-frames-4 { to { background-position-x: var(--strip); } }
+.lib-mats { display: flex; flex-direction: column; gap: 4px; }
+.lib-mat { display: grid; grid-template-columns: 18px auto 1fr; gap: 8px; align-items: center; padding: 4px 2px; }
+.lib-mat .swatch { width: 18px; height: 18px; border-radius: 4px; }
+.lib-mat .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

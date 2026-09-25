@@ -33,10 +33,13 @@ def copy_fits(
     tiles: dict[Hex, Tile],
     array: Callable[[str], np.ndarray],
     max_seam_delta: float,
+    check_pixels: bool = True,
 ) -> tuple[bool, str, dict[str, float]]:
+    """Edge contract always; pixel seams only when the copy will reuse the prototype's pixels
+    (a copy re-rendered in place by a deterministic ground renderer is seamless by construction)."""
     if source.status != TileStatus.accepted or not source.asset_id or not source.edges:
         return False, "prototype is not an accepted tile", {}
-    src_img = array(source.asset_id)
+    src_img = array(source.ground_asset_id or source.asset_id)
     seams: dict[str, float] = {}
     for i in range(6):
         n = tiles.get(target.neighbor(i))
@@ -50,7 +53,9 @@ def copy_fits(
                 f"neighbor needs {facing.terrain}{facing.connectors}",
                 seams,
             )
-        d = seam_delta(src_img, i, array(n.asset_id))
+        if not check_pixels:
+            continue
+        d = seam_delta(src_img, i, array(n.ground_asset_id or n.asset_id))
         seams[str(i)] = d
         if d > max_seam_delta:
             return False, f"visible seam on edge {i} (delta {d:.2f})", seams
@@ -66,6 +71,9 @@ def apply_copy(target: Tile, source: Tile, mode: str) -> None:
     target.attributes = dict(source.attributes)
     target.edges = [e.model_copy(deep=True) for e in source.edges or []]
     target.asset_id = source.asset_id  # assets are immutable + content-addressed: safe to share
+    target.ground_asset_id = source.ground_asset_id
+    target.layers = [layer.model_copy() for layer in source.layers]
+    target.relief = source.relief
     target.side_color = source.side_color
     target.art_prompt = source.art_prompt
     target.preview_asset_id = None

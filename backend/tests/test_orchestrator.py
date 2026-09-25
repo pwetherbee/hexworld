@@ -34,7 +34,8 @@ async def test_full_run_fills_plan_with_valid_seams(make_runtime):
             n = tiles.get(h.neighbor(i))
             if n and t.status == TileStatus.accepted and n.status == TileStatus.accepted:
                 assert t.edges[i].compatible_with(n.edges[(i + 3) % 6])
-                a, b = load_tile(rt.store.get_asset(t.asset_id)), load_tile(rt.store.get_asset(n.asset_id))
+                a = load_tile(rt.store.get_asset(t.ground_asset_id))
+                b = load_tile(rt.store.get_asset(n.ground_asset_id))
                 assert seam_delta(a, i, b) <= rt.settings.max_seam_delta
     w = rt.store.get_world(world.id)
     assert w.spec and w.style and w.anchor_asset_ids
@@ -162,7 +163,9 @@ async def test_extension_run_reuses_style_and_continues_edges(make_runtime):
     _, run2 = await _run(rt, "desert to the east", q=3, r=0, world=world, radius=1)
     assert run2.status == RunStatus.completed, run2.error
     w = rt.store.get_world(world.id)
-    assert w.style == style1
+    # style is locked except the palette, which only grows (new terrains need new colours)
+    assert w.style.model_dump(exclude={"palette"}) == style1.model_dump(exclude={"palette"})
+    assert set(style1.palette) <= set(w.style.palette)
     tiles = _tiles(rt, world)
     boundary = 0
     for h, t in tiles.items():

@@ -46,6 +46,12 @@ export interface World {
   style: StyleGuide | null;
   tile_attributes: AttributeDef[];
   anchor_asset_ids: string[];
+  materials: {
+    [k: string]: MaterialSpec;
+  };
+  sprites: {
+    [k: string]: SpriteEntry;
+  };
 }
 /**
  * This interface was referenced by `ApiSchemas`'s JSON-Schema
@@ -139,6 +145,173 @@ export interface AttributeDef {
 }
 /**
  * This interface was referenced by `ApiSchemas`'s JSON-Schema
+ * via the `definition` "MaterialSpec".
+ */
+export interface MaterialSpec {
+  /**
+   * '#rrggbb'. A 5-step ramp (outline/dark/base/light/hi) is derived.
+   */
+  base_color: string;
+  /**
+   * '#rrggbb' for accent decals (flowers, embers, sparkles).
+   */
+  accent_color: string;
+  base_tone: "dark" | "base" | "light";
+  liquid: boolean;
+  /**
+   * 0-9 height rank; higher materials get a dark lip where they meet lower ones.
+   */
+  rank: number;
+  /**
+   * How this material's own border pixels look: foam (water), glow (lava), lip, none.
+   */
+  boundary: "lip" | "foam" | "glow" | "none";
+  /**
+   * Pattern layers in paint order (<= 8).
+   */
+  ops: PatternOp[];
+  /**
+   * Ambient sprites for tiles of this material (<= 2 kinds).
+   */
+  scatter: ScatterSpec[];
+}
+/**
+ * One layer of a material, evaluated in world pixel coordinates (seamless across tiles).
+ *
+ * patches:  smooth noise blobs, coverage = amount       stripes: waves at `angle`, period = scale
+ * speckle:  random single pixels, density = amount      cells:   voronoi cracks/mortar, width ~ amount
+ * cellfill: fill a fraction (amount) of voronoi cells    bevel:   per-cell light/dark bevel (stones)
+ * decals:   stamp `pixels` on a jittered grid (cell = scale, density = amount)
+ *
+ * This interface was referenced by `ApiSchemas`'s JSON-Schema
+ * via the `definition` "PatternOp".
+ */
+export interface PatternOp {
+  op: "patches" | "speckle" | "stripes" | "cells" | "cellfill" | "bevel" | "decals";
+  tone: "outline" | "dark" | "base" | "light" | "hi" | "accent";
+  /**
+   * Feature size in pixels (2-16).
+   */
+  scale: number;
+  /**
+   * 0-1 coverage/density/width, per op.
+   */
+  amount: number;
+  /**
+   * Degrees, for stripes.
+   */
+  angle: number;
+  /**
+   * Decal pattern (for 'decals'); [] otherwise.
+   */
+  pixels: DecalPixel[];
+}
+/**
+ * This interface was referenced by `ApiSchemas`'s JSON-Schema
+ * via the `definition` "DecalPixel".
+ */
+export interface DecalPixel {
+  dx: number;
+  dy: number;
+  tone: "outline" | "dark" | "base" | "light" | "hi" | "accent";
+}
+/**
+ * This interface was referenced by `ApiSchemas`'s JSON-Schema
+ * via the `definition` "ScatterSpec".
+ */
+export interface ScatterSpec {
+  /**
+   * Sprite kind placed around this material, e.g. 'oak tree', 'boulder'.
+   */
+  kind: string;
+  /**
+   * Sprites per tile of this material (0-8).
+   */
+  count: number;
+}
+/**
+ * This interface was referenced by `ApiSchemas`'s JSON-Schema
+ * via the `definition` "SpriteEntry".
+ */
+export interface SpriteEntry {
+  kind: string;
+  program: SpriteProgram;
+  asset_id: string;
+  px_w: number;
+  px_h: number;
+  frames: number;
+  fps: number;
+  motion: "none" | "sway" | "bob" | "flicker" | "pulse";
+  run_id: string | null;
+}
+/**
+ * This interface was referenced by `ApiSchemas`'s JSON-Schema
+ * via the `definition` "SpriteProgram".
+ */
+export interface SpriteProgram {
+  /**
+   * Canvas width in pixels (4-32). Match the ground's pixel scale.
+   */
+  width: number;
+  /**
+   * Canvas height in pixels (4-32).
+   */
+  height: number;
+  /**
+   * 1-6 base colors '#rrggbb'; each gets a ramp (dark/base/light/hi).
+   */
+  colors: string[];
+  /**
+   * Painted in order (later shapes on top). <= 80.
+   */
+  shapes: ShapeOp[];
+  /**
+   * Animation frames (1-4).
+   */
+  frames: number;
+  /**
+   * Frame rate if frames > 1.
+   */
+  fps: number;
+  /**
+   * Procedural motion applied by the renderer.
+   */
+  motion: "none" | "sway" | "bob" | "flicker" | "pulse";
+}
+/**
+ * One primitive on the sprite canvas (pixel units, origin top-left).
+ *
+ * rect: top-left (x, y), size (w, h) | ellipse: center (x, y), radii (w, h)
+ * tri: apex (x, y), base at y+h, half-width w | line: (x, y) -> (x+w, y+h) | pixel: (x, y)
+ *
+ * This interface was referenced by `ApiSchemas`'s JSON-Schema
+ * via the `definition` "ShapeOp".
+ */
+export interface ShapeOp {
+  op: "rect" | "ellipse" | "tri" | "line" | "pixel";
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /**
+   * Index into the program's colors.
+   */
+  color: number;
+  /**
+   * Ramp step of that color.
+   */
+  tone: "outline" | "dark" | "base" | "light" | "hi";
+  /**
+   * Auto-shade: lighter upper-left, darker lower-right.
+   */
+  shade: boolean;
+  /**
+   * Frames this shape appears in; [] = every frame.
+   */
+  frames: number[];
+}
+/**
+ * This interface was referenced by `ApiSchemas`'s JSON-Schema
  * via the `definition` "WorldDetail".
  */
 export interface WorldDetail {
@@ -164,6 +337,9 @@ export interface Tile {
   };
   edges: EdgeSpec[] | null;
   asset_id: string | null;
+  ground_asset_id: string | null;
+  layers: TileLayer[];
+  relief: number;
   preview_asset_id: string | null;
   side_color: string | null;
   art_prompt: string | null;
@@ -186,6 +362,27 @@ export interface EdgeSpec {
    * Connectors crossing this edge (subset of connector_vocabulary).
    */
   connectors: string[];
+}
+/**
+ * One visual layer of a tile. The ground layer is the seamless top-face texture. Sprite layers
+ * stand on it as upright billboards: side-view pixel art, optionally a horizontal strip of animation
+ * frames, plus a procedural motion the renderer applies.
+ *
+ * This interface was referenced by `ApiSchemas`'s JSON-Schema
+ * via the `definition` "TileLayer".
+ */
+export interface TileLayer {
+  kind: "ground" | "sprite";
+  asset_id: string;
+  label: string;
+  x: number;
+  y: number;
+  width: number;
+  px_w: number;
+  px_h: number;
+  frames: number;
+  fps: number;
+  motion: "none" | "sway" | "bob" | "flicker" | "pulse";
 }
 /**
  * This interface was referenced by `ApiSchemas`'s JSON-Schema
@@ -409,6 +606,32 @@ export interface TileDesign {
   edges: EdgeSpec[];
   art_prompt: string;
   negative_prompt: string;
+  relief: number;
+  props: PropSpec[];
+}
+/**
+ * A sprite standing on the tile (tree, castle, campfire...). Rendered as its own layer.
+ *
+ * This interface was referenced by `ApiSchemas`'s JSON-Schema
+ * via the `definition` "PropSpec".
+ */
+export interface PropSpec {
+  /**
+   * What it is, e.g. 'castle', 'pine tree', 'campfire', 'dark obelisk'.
+   */
+  kind: string;
+  /**
+   * -0.6 (west) .. 0.6 (east), tile-local.
+   */
+  x: number;
+  /**
+   * -0.6 (north) .. 0.6 (south), tile-local.
+   */
+  y: number;
+  /**
+   * 0.6 .. 1.6 relative size.
+   */
+  scale: number;
 }
 /**
  * This interface was referenced by `ApiSchemas`'s JSON-Schema

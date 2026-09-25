@@ -21,13 +21,17 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from PIL import Image
 
+from hexworld.agents import artist
 from hexworld.agents import super as super_agent
 from hexworld.agents import tile as tile_agent
 from hexworld.agents.llm import BudgetExceeded, LLMGateway, RunBudget
 from hexworld.art.backend import ImageRequest
 from hexworld.art.composite import context_canvas, crop_target, neighborhood_png, render_region, to_png
-from hexworld.art.pixelize import PixelTile, load_tile, pixelize
+from hexworld.art.pixelize import PixelTile, crisp_tile, hex_mask, load_tile, pixelize
+from hexworld.art.procedural import fallback_material, ramp_hexes
+from hexworld.art.sprites import Placed, SpriteArt, flatten, rasterize, scatter_positions
 from hexworld.domain import (
     NO_COPY,
     Attempt,
@@ -40,11 +44,13 @@ from hexworld.domain import (
     RunStatus,
     Tile,
     TileDesign,
+    TileLayer,
     TileStatus,
     Verdict,
     World,
     WorldPlan,
 )
+from hexworld.domain.art import MaterialSpec, SpriteEntry, kind_key
 from hexworld.hex import DIRECTION_NAMES, ORIGIN, Hex, opposite, spiral
 from hexworld.orchestrator.copies import apply_copy, copy_fits, resolve_root, sync_shallow_copies
 from hexworld.orchestrator.validators import CheckResult, check_candidate
@@ -69,10 +75,14 @@ class Candidate:
     job: Job
     attempt: Attempt
     design: TileDesign
-    pix: PixelTile
-    asset_id: str
+    pix: PixelTile  # ground layer
+    asset_id: str  # flattened preview (ground + sprites)
     checks: CheckResult
     normalization: dict[str, Any] = field(default_factory=dict)
+    ground_id: str = ""
+    flat: np.ndarray | None = None
+    flat_png: bytes = b""
+    layers: list[TileLayer] = field(default_factory=list)
 
 
 class RunExecutor:
@@ -99,6 +109,8 @@ class RunExecutor:
         self._budget_error: BudgetExceeded | None = None
         self._deferred_copies: list[Tile] = []
         self._plan_notes: list[str] = []
+        self._inflight: dict[str, asyncio.Future] = {}  # single-flight library generation
+        self._sprite_arts: dict[str, SpriteArt] = {}
         self.origin = run.origin.hex
 
     # ================================================================== lifecycle
@@ -122,6 +134,7 @@ class RunExecutor:
                     await self._plan(root)
                 else:
                     self._reset_inflight()
+                await self._stock_library(root)
                 if not self.world.anchor_asset_ids:
                     await self._bootstrap_anchor(root)
                 await self._expand(root)
@@ -232,6 +245,9 @@ class RunExecutor:
             for c in plan.world.connector_vocabulary:
                 if c not in w.spec.connector_vocabulary:
                     w.spec.connector_vocabulary.append(c)
+            # New terrains need new colours: the palette grows, the rest of the style stays locked.
+            assert w.style is not None
+            w.style.palette = _merge_palette(w.style.palette, plan.style.palette)
         self.store.put_world(w)
         vocab = w.spec.terrain_vocabulary
         conns = set(w.spec.connector_vocabulary)
@@ -315,6 +331,242 @@ class RunExecutor:
             out[pt.hex] = spec
         return out
 
+    # ================================================================== session library
+
+    async def _stock_library(self, root: Span) -> None:
+        """Design everything the plan needs up front, in parallel: a material for every terrain and
+        connector, then a sprite for every planned feature and every material's ambient scatter kind.
+        Later tiles only generate what is genuinely new."""
+        w = self.world
+        assert w.spec is not None
+        async with self.tracer.span("library.stock", root) as sp:
+            names = [(n, False) for n in w.spec.terrain_vocabulary] + [
+                (n, True) for n in w.spec.connector_vocabulary
+            ]
+            missing = [(n, c) for n, c in names if n not in w.materials]
+            await asyncio.gather(*[self._ensure_material(n, c, sp) for n, c in missing])
+            self._raise_budget()
+            kinds: dict[str, str] = {}
+            for t in self.tiles.values():
+                if t.run_id == self.run.id and t.directive is not None:
+                    for f in t.directive.features:
+                        kinds.setdefault(kind_key(f), f"{t.directive.biome}: {t.directive.intent}")
+            for name, spec in w.materials.items():
+                for sc in spec.scatter:
+                    kinds.setdefault(kind_key(sc.kind), f"ambient on {name}")
+            todo = [(k, ctx) for k, ctx in kinds.items() if k not in w.sprites]
+            await asyncio.gather(*[self._ensure_sprite(k, ctx, sp) for k, ctx in todo])
+            self._raise_budget()
+            sp.set(materials=len(missing), sprites=len(todo), library_size=len(w.materials) + len(w.sprites))
+
+    async def _single_flight(self, key: str, make):
+        """Concurrent requests for the same library item share one generation."""
+        fut = self._inflight.get(key)
+        if fut is not None:
+            return await fut
+        fut = asyncio.get_running_loop().create_future()
+        self._inflight[key] = fut
+        try:
+            result = await make()
+            fut.set_result(result)
+            return result
+        except BaseException as e:
+            fut.set_exception(e)
+            fut.exception()  # mark retrieved
+            raise
+        finally:
+            self._inflight.pop(key, None)
+
+    async def _ensure_material(self, name: str, is_connector: bool, parent: Span | None) -> MaterialSpec:
+        w = self.world
+        if name in w.materials:
+            return w.materials[name]
+
+        async def make() -> MaterialSpec:
+            async with self.tracer.span("library.material", parent, material=name) as sp:
+                try:
+                    spec = await artist.design_material(
+                        self.gw, world=w, name=name, is_connector=is_connector, parent=sp
+                    )
+                except BudgetExceeded as e:
+                    self._budget_error = e
+                    return fallback_material(name)
+                except Exception as e:  # noqa: BLE001 - render with a plain fallback, retry next run
+                    sp.set(error=str(e)[:200], fallback=True)
+                    return fallback_material(name)
+                w.materials[name] = spec
+                assert w.style is not None
+                w.style.palette = _merge_palette(
+                    w.style.palette, [*ramp_hexes(spec.base_color), spec.accent_color]
+                )
+                self.store.put_world(w)
+                sp.set(ops=len(spec.ops), scatter=[s.kind for s in spec.scatter])
+                self.tracer.emit("library.material_added", data={"name": name, "spec": spec.model_dump()})
+                return spec
+
+        return await self._single_flight(f"m:{name}", make)
+
+    async def _ensure_sprite(self, kind: str, context: str, parent: Span | None) -> SpriteEntry | None:
+        w = self.world
+        key = kind_key(kind)
+        if key in w.sprites:
+            return w.sprites[key]
+
+        async def make() -> SpriteEntry | None:
+            async with self.tracer.span("library.sprite", parent, kind=key) as sp:
+                try:
+                    program = await artist.design_sprite(
+                        self.gw, world=w, kind=key, context=context, anchor_png=self._anchor_png(), parent=sp
+                    )
+                except BudgetExceeded as e:
+                    self._budget_error = e
+                    return None
+                except Exception as e:  # noqa: BLE001 - the tile simply goes without this prop
+                    sp.set(error=str(e)[:200])
+                    return None
+                art = await asyncio.to_thread(rasterize, program)
+                asset_id = self.store.put_asset(
+                    art.strip_png(), {"kind": "sprite", "sprite": key, "run_id": self.run.id}
+                )
+                entry = SpriteEntry(
+                    kind=key,
+                    program=program,
+                    asset_id=asset_id,
+                    px_w=art.w,
+                    px_h=art.h,
+                    frames=len(art.frames),
+                    fps=art.fps,
+                    motion=program.motion,
+                    run_id=self.run.id,
+                )
+                w.sprites[key] = entry
+                self._sprite_arts[asset_id] = art
+                self.store.put_world(w)
+                sp.set(
+                    asset_id=asset_id, size=[art.w, art.h], frames=len(art.frames), shapes=len(program.shapes)
+                )
+                self.tracer.emit(
+                    "library.sprite_added",
+                    data={
+                        "kind": key,
+                        "asset_id": asset_id,
+                        "px_w": art.w,
+                        "px_h": art.h,
+                        "frames": len(art.frames),
+                    },
+                )
+                return entry
+
+        return await self._single_flight(f"s:{key}", make)
+
+    async def _render_copy_in_place(self, t: Tile, src: Tile) -> None:
+        """Copy the design, not the pixels: re-render the ground at this tile's own world position
+        (seamless with its neighbours) and keep the prototype's props. No LLM calls."""
+        style = self.world.style
+        assert style is not None and t.edges is not None
+        P = style.tile_px
+        req = ImageRequest(
+            prompt="",
+            negative="",
+            seed=0,
+            size=self.s.gen_px,
+            hints={
+                "tile_px": P,
+                "palette": style.palette,
+                "biome": src.biome,
+                "edges": [e.model_dump() for e in t.edges],
+                "coord": (t.q, t.r),
+                "materials": {n: m.model_dump() for n, m in self.world.materials.items()},
+            },
+        )
+        async with self.rt.gpu_sem:
+            res = await self.rt.image.generate(req)
+        pix = await asyncio.to_thread(crisp_tile, res.png, P)
+        ground_id = self.store.put_asset(
+            pix.png, {"kind": "ground", "run_id": self.run.id, "copy_of": src.key}
+        )
+        self._arrays[ground_id] = pix.rgba
+        sprites = [layer for layer in src.layers if layer.kind == "sprite"]
+        placed = []
+        for layer in sprites:
+            art = self._sprite_arts.get(layer.asset_id) or SpriteArt.from_strip(
+                self.store.get_asset(layer.asset_id), layer.frames, layer.motion, layer.fps
+            )
+            self._sprite_arts[layer.asset_id] = art
+            placed.append(Placed(layer.label, art, layer.x, layer.y, layer.width / (art.w / (P / 2.0))))
+        flat = flatten(pix.rgba, placed, P)
+        flat[~hex_mask(P)] = 0
+        flat_id = self.store.put_asset(to_png(Image.fromarray(flat, "RGBA")), {"kind": "tile_preview"})
+        self._arrays[flat_id] = flat
+        t.ground_asset_id = ground_id
+        t.asset_id = flat_id
+        t.layers = [
+            TileLayer(kind="ground", asset_id=ground_id, px_w=P, px_h=P),
+            *[s.model_copy() for s in sprites],
+        ]
+        t.side_color = pix.side_color
+
+    def _sprite_art(self, entry: SpriteEntry) -> SpriteArt:
+        art = self._sprite_arts.get(entry.asset_id)
+        if art is None:
+            art = SpriteArt.from_strip(
+                self.store.get_asset(entry.asset_id), entry.frames, entry.motion, entry.fps
+            )
+            self._sprite_arts[entry.asset_id] = art
+        return art
+
+    async def _compose_layers(
+        self, design: TileDesign, t: Tile, ground: PixelTile, ground_id: str, variant: int, parent: Span
+    ) -> tuple[list[TileLayer], np.ndarray]:
+        """Ground + prop sprites (designed on demand) + ambient scatter from the biome's material."""
+        style = self.world.style
+        assert style is not None
+        P = style.tile_px
+        # A landmark (at most one) stands in the middle; ambient scatter only when there is none.
+        wanted: list[tuple[str, float, float, float, str]] = [
+            (
+                p.kind,
+                max(-0.12, min(0.12, p.x)),
+                max(-0.02, min(0.2, p.y)),
+                p.scale,
+                f"{design.biome}: {design.summary}",
+            )
+            for p in design.props[:1]
+        ]
+        mat = self.world.materials.get(design.biome)
+        if mat is not None and not wanted:
+            for kind, x, y, sc in scatter_positions(mat.scatter, (t.q, t.r), variant):
+                wanted.append((kind, x, y, sc, f"ambient on {design.biome}"))
+        entries = await asyncio.gather(*[self._ensure_sprite(k, ctx, parent) for k, _, _, _, ctx in wanted])
+        layers = [TileLayer(kind="ground", asset_id=ground_id, px_w=P, px_h=P)]
+        placed: list[Placed] = []
+        for (_kind, x, y, sc, _), e in zip(wanted, entries, strict=True):
+            if e is None:
+                continue
+            art = self._sprite_art(e)
+            is_landmark = _kind == wanted[0][0] and len(design.props) > 0
+            max_w = 1.0 if is_landmark else 0.5  # in hex radii: landmarks <= 1 radius, scatter half that
+            sc = min(sc, max_w * (P / 2.0) / max(1, art.w))
+            placed.append(Placed(kind=e.kind, art=art, x=x, y=y, scale=sc))
+            layers.append(
+                TileLayer(
+                    kind="sprite",
+                    asset_id=e.asset_id,
+                    label=e.kind,
+                    x=x,
+                    y=y,
+                    width=art.w / (P / 2.0) * sc,
+                    px_w=art.w,
+                    px_h=art.h,
+                    frames=e.frames,
+                    fps=e.fps,
+                    motion=e.motion,
+                )
+            )
+        flat = flatten(ground.rgba, placed, P)
+        flat[~hex_mask(P)] = 0
+        return layers, flat
+
     # ================================================================== anchor bootstrap
 
     async def _bootstrap_anchor(self, root: Span) -> None:
@@ -346,7 +598,7 @@ class RunExecutor:
                         self.gw,
                         world=self.world,
                         intent=job.directive.intent,
-                        candidates=[c.pix.png for c in good],
+                        candidates=[c.flat_png or c.pix.png for c in good],
                         parent=sp,
                     )
                     best = good[pick.best_label - 1]
@@ -439,13 +691,23 @@ class RunExecutor:
         async with self.tracer.span(
             "tile.copy", parent, q=t.q, r=t.r, mode=spec.mode, source=spec.source.key
         ) as sp:
+            in_place = bool(getattr(self.rt.image, "deterministic_ground", False))
             if src is not None and ready:
-                ok, reason, seams = copy_fits(t.hex, src, self.tiles, self._array, self.s.max_seam_delta)
+                ok, reason, seams = copy_fits(
+                    t.hex,
+                    src,
+                    self.tiles,
+                    self._ground_array,
+                    self.s.max_seam_delta,
+                    check_pixels=not in_place,
+                )
             else:
                 ok, reason, seams = False, "prototype was never accepted", {}
-            sp.set(copied=ok, reason=reason, seam_delta=seams)
+            sp.set(copied=ok, reason=reason, seam_delta=seams, in_place=in_place)
             if ok and src is not None:
                 apply_copy(t, src, spec.mode)
+                if in_place:
+                    await self._render_copy_in_place(t, src)
                 self._save_tile(t)
                 self.run.stats.tiles_copied += 1
                 self.run.stats.tiles_accepted += 1
@@ -573,6 +835,7 @@ class RunExecutor:
                         anchor_png=anchor,
                         context_png=neighborhood_png(h, arrays_by_hex, P) if arrays_by_hex else None,
                         parent=dsp,
+                        sprite_library=sorted(world.sprites),
                     )
                     design, norm = tile_agent.normalize_design(design, world, facing)
                     dsp.set(biome=design.biome, summary=design.summary, normalization=norm)
@@ -593,7 +856,7 @@ class RunExecutor:
                         "biome": design.biome,
                         "edges": [e.model_dump() for e in design.edges],
                         "coord": (t.q, t.r),
-                        "features": job.directive.features,
+                        "materials": {n: m.model_dump() for n, m in self.world.materials.items()},
                     },
                 )
                 if arrays_by_hex:
@@ -611,7 +874,11 @@ class RunExecutor:
 
                 # 3) pixelize onto the master palette + hex mask
                 src = crop_target(res.png, P) if res.meta.get("framing") == "context" else res.png
-                pix = await asyncio.to_thread(pixelize, src, style.palette, P)
+                pix = (
+                    await asyncio.to_thread(crisp_tile, src, P)
+                    if res.meta.get("crisp")
+                    else await asyncio.to_thread(pixelize, src, style.palette, P)
+                )
 
                 # 4) deterministic checks
                 checks = check_candidate(
@@ -621,10 +888,10 @@ class RunExecutor:
                     min_coverage=self.s.min_coverage,
                     min_distinct_colors=self.s.min_distinct_colors,
                 )
-                asset_id = self.store.put_asset(
+                ground_id = self.store.put_asset(
                     pix.png,
                     {
-                        "kind": "tile",
+                        "kind": "ground",
                         "run_id": self.run.id,
                         "q": t.q,
                         "r": t.r,
@@ -635,9 +902,20 @@ class RunExecutor:
                         **res.meta,
                     },
                 )
-                self._arrays[asset_id] = pix.rgba
+                self._arrays[ground_id] = pix.rgba
+
+                # 5) layers: prop sprites + ambient scatter on top of the ground
+                async with self.tracer.span("tile.layers", sp) as lsp:
+                    layers, flat = await self._compose_layers(design, t, pix, ground_id, variant, lsp)
+                    lsp.set(sprites=[layer.label for layer in layers if layer.kind == "sprite"])
+                flat_png = to_png(Image.fromarray(flat, "RGBA"))
+                asset_id = self.store.put_asset(
+                    flat_png, {"kind": "tile_preview", "run_id": self.run.id, "q": t.q, "r": t.r}
+                )
+                self._arrays[asset_id] = flat
                 attempt.asset_id = asset_id
                 attempt.validation = {
+                    "ground_asset_id": ground_id,
                     "ok": checks.ok,
                     "failures": checks.failures,
                     **checks.metrics,
@@ -656,12 +934,16 @@ class RunExecutor:
                     attempt.outcome = "invalid"
                     self.run.stats.rejections_validation += 1
                     self.store.put_attempt(attempt)
-                    return Candidate(job, attempt, design, pix, asset_id, checks, norm)
+                    return Candidate(
+                        job, attempt, design, pix, asset_id, checks, norm, ground_id, flat, flat_png, layers
+                    )
                 t.status = TileStatus.reviewing
                 t.preview_asset_id = asset_id
                 self._save_tile(t)
                 self.store.put_attempt(attempt)
-                return Candidate(job, attempt, design, pix, asset_id, checks, norm)
+                return Candidate(
+                    job, attempt, design, pix, asset_id, checks, norm, ground_id, flat, flat_png, layers
+                )
         except BudgetExceeded as e:
             self._budget_error = e
             attempt.outcome, attempt.error = "error", str(e)
@@ -694,7 +976,7 @@ class RunExecutor:
         slots: set[Hex] = set()
         for c in cands:
             h = c.job.tile.hex
-            region[h] = c.pix.rgba
+            region[h] = c.flat if c.flat is not None else c.pix.rgba
             for n in h.neighbors():
                 slots.add(n)
                 nt = self.tiles.get(n)
@@ -782,6 +1064,9 @@ class RunExecutor:
         t.attributes = c.design.attributes
         t.edges = c.design.edges
         t.asset_id = c.asset_id
+        t.ground_asset_id = c.ground_id or c.asset_id
+        t.layers = c.layers
+        t.relief = c.design.relief
         t.preview_asset_id = None
         t.side_color = c.pix.side_color
         t.art_prompt = c.design.art_prompt
@@ -826,7 +1111,7 @@ class RunExecutor:
                     biome=nt.biome, summary=nt.summary, art_prompt=nt.art_prompt, facing_edge=fe.model_dump()
                 )
                 facing[i] = fe
-                arrays[i] = self._array(nt.asset_id)
+                arrays[i] = self._array(nt.ground_asset_id or nt.asset_id)
             elif nt and nt.directive is not None and nt.status in ACTIVE_STATUSES:
                 entry.update(biome=nt.directive.biome, intent=nt.directive.intent)
             info.append(entry)
@@ -849,6 +1134,9 @@ class RunExecutor:
             a = load_tile(self.store.get_asset(asset_id))
             self._arrays[asset_id] = a
         return a
+
+    def _ground_array(self, asset_id: str) -> np.ndarray:
+        return self._array(asset_id)
 
     def _anchor_png(self) -> bytes | None:
         ids = self.world.anchor_asset_ids
@@ -875,9 +1163,19 @@ def _image_prompt(design: TileDesign, world: World) -> str:
         for i, e in enumerate(design.edges)
     )
     return (
-        f"{design.art_prompt} Ground: {design.biome.replace('_', ' ')}; {edge_desc}. "
-        f"{style.view}, light {style.light_direction}, {style.outline}. {style.style_keywords}, pixel art game map tile"
+        f"Top-down ground texture only, no buildings, trees or props. {design.art_prompt} "
+        f"Ground: {design.biome.replace('_', ' ')}; {edge_desc}. Light {style.light_direction}. "
+        f"{style.style_keywords}, pixel art game map tile"
     )
+
+
+def _merge_palette(palette: list[str], extra: list[str], cap: int = 128) -> list[str]:
+    out = [c.lower() for c in palette]
+    for c in extra:
+        c = c.lower()
+        if c not in out and len(out) < cap:
+            out.append(c)
+    return out
 
 
 def _negative(design: TileDesign) -> str:

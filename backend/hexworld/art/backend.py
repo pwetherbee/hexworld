@@ -1,6 +1,6 @@
 """Image generation backends behind one protocol.
 
-- ProceduralStubBackend: deterministic, offline, seam-consistent procedural pixel art (tests/dev)
+- ProceduralBackend: deterministic, offline, seam-consistent procedural pixel-art ground (default)
 - ComfyUIBackend: local open-source diffusion (Z-Image Turbo / FLUX.2 klein ...) via ComfyUI's API
 - OpenAIImageBackend: hosted fallback (GPT Image), output goes through the same pixelizer
 - FallbackImageBackend: circuit breaker that routes around a failing primary
@@ -14,7 +14,6 @@ import copy
 import hashlib
 import io
 import json
-import math
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -23,9 +22,6 @@ from typing import Any, Literal, Protocol
 
 import numpy as np
 from PIL import Image
-
-from hexworld.agents.themes import base_color, hex_to_rgb, nearest_palette, shade
-from hexworld.hex import DIRECTION_ANGLES, SQRT3, Hex
 
 
 @dataclass
@@ -61,169 +57,50 @@ class ImageBackendError(Exception):
     pass
 
 
-# --------------------------------------------------------------------------- procedural stub
-
-BAYER4 = np.array([[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]], dtype=np.float32) / 16.0
+# --------------------------------------------------------------------------- procedural
 
 
-def _hash01(*vals: float) -> float:
-    h = hashlib.blake2b(repr(vals).encode(), digest_size=8).digest()
-    return int.from_bytes(h, "little") / 2**64
+class ProceduralBackend:
+    """Offline pixel-art ground renderer (see art/procedural.py). It is driven by structured
+    hints (biome, edge contract, connectors) instead of the text prompt, so it is deterministic,
+    free, and seamless by construction. It returns the ground layer only; props are sprite layers."""
 
+    name = "procedural"
+    deterministic_ground = True  # same hints -> same pixels: copies can be re-rendered in place
 
-def _value_noise(x: np.ndarray, y: np.ndarray, cell: float, seed: int) -> np.ndarray:
-    """Cheap smooth value noise in *world* pixel coordinates (so it continues across tiles)."""
-    gx, gy = x / cell, y / cell
-    x0, y0 = np.floor(gx), np.floor(gy)
-    fx, fy = gx - x0, gy - y0
-
-    def rnd(ix: np.ndarray, iy: np.ndarray) -> np.ndarray:
-        v = np.sin(ix * 127.1 + iy * 311.7 + seed * 74.7) * 43758.5453
-        return v - np.floor(v)
-
-    sx, sy = fx * fx * (3 - 2 * fx), fy * fy * (3 - 2 * fy)
-    a, b = rnd(x0, y0), rnd(x0 + 1, y0)
-    c, d = rnd(x0, y0 + 1), rnd(x0 + 1, y0 + 1)
-    return (a + (b - a) * sx) * (1 - sy) + (c + (d - c) * sx) * sy
-
-
-class ProceduralStubBackend:
-    """Renders from structured hints: biome in the middle, each edge's terrain toward that edge,
-    connectors as paths to edge midpoints, features/trees as tiny sprites. Texture noise is in world
-    space and edge bands are pure edge terrain, so neighbors that agree on an EdgeSpec meet seamlessly.
-    Output is upscaled + jittered to mimic diffusion "fake pixels" and exercise the pixelizer."""
-
-    name = "stub"
-
-    def __init__(self, latency_s: float = 0.25, upscale: int = 4):
+    def __init__(self, latency_s: float = 0.25):
         self.latency_s = latency_s
-        self.upscale = upscale
 
     async def health(self) -> bool:
         return True
 
     async def generate(self, req: ImageRequest) -> ImageResult:
         if self.latency_s:
-            await asyncio.sleep(self.latency_s * (0.6 + 0.8 * _hash01(req.seed)))
+            await asyncio.sleep(self.latency_s * (0.6 + 0.8 * ((req.seed % 997) / 997)))
         png = await asyncio.to_thread(self._render, req)
-        return ImageResult(png=png, backend=self.name, meta={"seed": req.seed, "framing": "tile"})
+        return ImageResult(
+            png=png, backend=self.name, meta={"seed": req.seed, "framing": "tile", "crisp": True}
+        )
 
     def _render(self, req: ImageRequest) -> bytes:
+        from hexworld.art.procedural import render_ground
+
         h = req.hints
-        P: int = h["tile_px"]
-        palette: list[str] = h["palette"]
-        biome: str = h["biome"]
-        edges: list[dict[str, Any]] = h["edges"]
-        q, r = h["coord"]
-        wx0, wy0 = Hex(q, r).to_pixel(P / 2.0)
-        variant = req.seed % 997
-
-        s = P / 2.0
-        c = (np.arange(P) + 0.5) - s
-        x, y = np.meshgrid(c, c)
-        wx, wy = x + wx0, y + wy0
-        apothem = s * SQRT3 / 2
-        dots = np.stack(
-            [
-                (x * math.cos(math.radians(a)) + y * math.sin(math.radians(a))) / apothem
-                for a in DIRECTION_ANGLES
-            ],
-            axis=-1,
+        rgb = render_ground(
+            tile_px=h["tile_px"],
+            palette=h["palette"],
+            biome=h["biome"],
+            edges=h["edges"],
+            coord=tuple(h["coord"]),
         )
-        nearest_edge = dots.argmax(-1)
-        d = dots.max(-1)  # 0 center .. 1 edge
-
-        def shades(terrain: str) -> list[np.ndarray]:
-            b = base_color(terrain)
-            return [
-                np.array(hex_to_rgb(nearest_palette(shade(b, f), palette)), dtype=np.float32)
-                for f in (0.75, 1.0, 1.2)
-            ]
-
-        biome_sh = shades(biome)
-        edge_sh = [shades(e["terrain"]) for e in edges]
-
-        n1 = _value_noise(wx, wy, 5.0, 1)
-        n2 = _value_noise(wx, wy, 2.0, 2 + variant % 3)
-        tex = 0.65 * n1 + 0.35 * n2
-        bayer = BAYER4[(np.arange(P)[:, None] + int(wy0)) % 4, (np.arange(P)[None, :] + int(wx0)) % 4]
-
-        img = np.zeros((P, P, 3), dtype=np.float32)
-        t = np.clip((d - 0.42) / 0.40, 0, 1)
-        t = t * t * (3 - 2 * t)
-        use_edge = bayer < t
-        level = np.where(tex < 0.38, 0, np.where(tex < 0.72, 1, 2))
-        for li in range(3):
-            m = level == li
-            img[m] = biome_sh[li]
-            for ei in range(6):
-                me = m & use_edge & (nearest_edge == ei)
-                img[me] = edge_sh[ei][li]
-
-        # Connectors: straight paths from each connector edge's midpoint toward the center.
-        conn_edges = [(i, cn) for i, e in enumerate(edges) for cn in e.get("connectors", [])]
-        for i, cname in conn_edges:
-            col = np.array(hex_to_rgb(nearest_palette(base_color(cname), palette)), dtype=np.float32)
-            ang = math.radians(DIRECTION_ANGLES[i])
-            mx, my = math.cos(ang) * apothem, math.sin(ang) * apothem
-            # distance from segment center->midpoint
-            L2 = mx * mx + my * my
-            tt = np.clip((x * mx + y * my) / L2, 0, 1)
-            dist = np.hypot(x - tt * mx, y - tt * my)
-            width = max(1.2, P / 20)
-            img[dist <= width] = col
-            img[(dist <= width + 1) & (dist > width)] = col * 0.7
-        if len(conn_edges) == 1:  # dead end: small pond/plaza at the center
-            col = np.array(
-                hex_to_rgb(nearest_palette(base_color(conn_edges[0][1]), palette)), dtype=np.float32
-            )
-            img[np.hypot(x, y) <= P / 9] = col
-
-        # Props: trees for wooded biomes, generic landmarks for listed features.
-        wooded = any(k in biome for k in ("forest", "jungle", "pine", "wood"))
-        props: list[tuple[float, float, str]] = []
-        if wooded:
-            # Props stay inside the interior so the edge bands remain pure edge terrain.
-            for k in range(9):
-                ang = _hash01(q, r, k, 1) * 2 * math.pi
-                rad = math.sqrt(_hash01(q, r, k, 2)) * 0.5 * apothem
-                props.append((math.cos(ang) * rad, math.sin(ang) * rad, "tree"))
-        for k, _feat in enumerate(h.get("features", [])[:2]):
-            ang = _hash01(q, r, k, variant) * 2 * math.pi
-            props.append((math.cos(ang) * s * 0.28, math.sin(ang) * s * 0.28, "landmark"))
-        dark = np.array(hex_to_rgb(nearest_palette("#1b1b22", palette)), dtype=np.float32)
-        for px_, py_, kind in props:
-            if kind == "tree":
-                leaf = np.array(
-                    hex_to_rgb(nearest_palette(shade(base_color(biome), 0.6), palette)), dtype=np.float32
-                )
-                hi = np.array(
-                    hex_to_rgb(nearest_palette(shade(base_color(biome), 1.25), palette)), dtype=np.float32
-                )
-                rr = max(1.5, P / 16)
-                blob = np.hypot(x - px_, y - py_) <= rr
-                img[np.hypot(x - px_ + 0.5, y - py_ + 0.5) <= rr + 0.7] = dark
-                img[blob] = leaf
-                img[np.hypot(x - px_ + rr / 3, y - py_ + rr / 3) <= rr / 2.2] = hi
-            else:
-                wall = np.array(hex_to_rgb(nearest_palette("#9a8f84", palette)), dtype=np.float32)
-                roof = np.array(hex_to_rgb(nearest_palette("#8e3b46", palette)), dtype=np.float32)
-                bw = max(2, P // 9)
-                box = (np.abs(x - px_) <= bw) & (np.abs(y - py_) <= bw * 0.8)
-                img[(np.abs(x - px_) <= bw + 1) & (np.abs(y - py_) <= bw * 0.8 + 1)] = dark
-                img[box] = wall
-                img[box & (y - py_ < 0)] = roof
-
-        # Upscale + jitter: mimic generator output so the pixelizer is actually exercised.
-        big = np.repeat(np.repeat(img, self.upscale, 0), self.upscale, 1)
-        rng = np.random.default_rng(req.seed)
-        big = np.clip(big + rng.normal(0, 5, big.shape), 0, 255).astype(np.uint8)
-        out = Image.fromarray(big, "RGB")
-        if out.width != req.size:
-            out = out.resize((req.size, req.size), Image.Resampling.NEAREST)
+        up = max(1, req.size // h["tile_px"])
+        big = np.repeat(np.repeat(rgb, up, 0), up, 1)
         buf = io.BytesIO()
-        out.save(buf, format="PNG")
+        Image.fromarray(big, "RGB").save(buf, format="PNG")
         return buf.getvalue()
+
+
+ProceduralStubBackend = ProceduralBackend  # backwards-compatible name
 
 
 # --------------------------------------------------------------------------- ComfyUI
@@ -431,6 +308,10 @@ class FallbackImageBackend:
         self._failures = 0
         self._open_until = 0.0
         self.name = primary.name if fallback is None else f"{primary.name}>{fallback.name}"
+
+    @property
+    def deterministic_ground(self) -> bool:
+        return getattr(self.primary, "deterministic_ground", False) and not self.circuit_open
 
     @property
     def circuit_open(self) -> bool:

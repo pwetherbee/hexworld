@@ -1,12 +1,14 @@
 import { create } from "zustand";
 import { api, type Health } from "./api/client";
-import type { Event as HwEvent, Run, RunOptions, RunStats, Tile, World } from "./api/types.gen";
+import type { Event as HwEvent, MaterialSpec, Run, RunOptions, RunStats, Tile, World } from "./api/types.gen";
 import { hexKey } from "./board/hexMath";
 import { sfx } from "./sfx";
 
 const MAX_EVENTS = 6000;
 
-export type Tab = "run" | "timeline" | "tile" | "log";
+export type Tab = "run" | "library" | "timeline" | "tile" | "log";
+
+export type LibSprite = { kind: string; asset_id: string; px_w: number; px_h: number; frames: number };
 
 interface State {
   health: Health | null;
@@ -34,6 +36,13 @@ interface State {
   acceptedAt: Record<string, number>;
   rejectedAt: Record<string, number>;
   plannedAt: Record<string, number>;
+  /** grid ripple from where the latest run started */
+  ripple: { q: number; r: number; at: number } | null;
+  /** session library (agent-designed assets), live-updated from events */
+  libSprites: Record<string, LibSprite>;
+  libMaterials: Record<string, MaterialSpec>;
+  /** asset designs in flight (material/sprite artists) */
+  libraryBusy: number;
   /** camera auto-follows the build (rate limited, yields to user input) */
   follow: boolean;
   tileVersion: Record<string, number>;
@@ -84,6 +93,10 @@ export const useStore = create<State>((set, get) => ({
   acceptedAt: {},
   rejectedAt: {},
   plannedAt: {},
+  ripple: null,
+  libSprites: {},
+  libMaterials: {},
+  libraryBusy: 0,
   follow: localStorageGet("hexworld.follow") !== "0",
   tileVersion: {},
   error: null,
@@ -125,6 +138,9 @@ export const useStore = create<State>((set, get) => ({
       acceptedAt: {},
       rejectedAt: {},
       plannedAt: {},
+      libSprites: libFrom(detail.world),
+      libMaterials: detail.world.materials ?? {},
+      libraryBusy: 0,
     });
   },
 
@@ -144,6 +160,8 @@ export const useStore = create<State>((set, get) => ({
       world: detail.world,
       runs,
       worlds: s.worlds.map((x) => (x.id === detail.world.id ? detail.world : x)),
+      libSprites: { ...s.libSprites, ...libFrom(detail.world) },
+      libMaterials: { ...s.libMaterials, ...(detail.world.materials ?? {}) },
     }));
   },
 
@@ -156,6 +174,7 @@ export const useStore = create<State>((set, get) => ({
       activeRunId: run.id,
       focusRunId: run.id,
       promptTarget: null,
+      ripple: { q: run.origin.q, r: run.origin.r, at: Date.now() },
     }));
     sfx.play("confirm");
   },
@@ -202,8 +221,10 @@ export const useStore = create<State>((set, get) => ({
       patch.activeRunId = ev.run_id;
       if (!s.focusRunId || live) patch.focusRunId = ev.run_id;
       if (!s.runs[ev.run_id] && live) void get().refreshWorld();
+      if (live && ev.q != null && ev.r != null) patch.ripple = { q: ev.q, r: ev.r, at: Date.now() };
     } else if (TERMINAL.has(ev.type) && ev.run_id) {
       if (s.activeRunId === ev.run_id) patch.activeRunId = null;
+      patch.libraryBusy = 0;
       const run = s.runs[ev.run_id];
       if (run) {
         patch.runs = {
@@ -221,6 +242,15 @@ export const useStore = create<State>((set, get) => ({
         void get().refreshWorld();
         if (ev.type === "run.completed") sfx.play("done");
       }
+    } else if (ev.type === "library.sprite_added") {
+      const k = data.kind as string;
+      patch.libSprites = { ...s.libSprites, [k]: data as unknown as LibSprite };
+    } else if (ev.type === "library.material_added") {
+      patch.libMaterials = { ...s.libMaterials, [data.name as string]: data.spec as MaterialSpec };
+    } else if (live && (ev.type === "library.material.started" || ev.type === "library.sprite.started")) {
+      patch.libraryBusy = s.libraryBusy + 1;
+    } else if (live && (ev.type === "library.material.finished" || ev.type === "library.sprite.finished")) {
+      patch.libraryBusy = Math.max(0, s.libraryBusy - 1);
     } else if (ev.type === "plan.created" && live) {
       void get().refreshWorld();
     }
@@ -247,6 +277,14 @@ export const useStore = create<State>((set, get) => ({
     set({ follow });
   },
 }));
+
+function libFrom(w: World): Record<string, LibSprite> {
+  const out: Record<string, LibSprite> = {};
+  for (const [k, e] of Object.entries(w.sprites ?? {})) {
+    out[k] = { kind: e.kind, asset_id: e.asset_id, px_w: e.px_w, px_h: e.px_h, frames: e.frames };
+  }
+  return out;
+}
 
 function localStorageGet(k: string): string | null {
   try {

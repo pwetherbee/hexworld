@@ -10,12 +10,14 @@ with concrete feedback for the rejected ones.
 
 The project is a testbed for multi-agent coordination that is **robust, observable and efficient**.
 
-## Quick start (fully offline)
+## Quick start
 
 ```bash
 cd backend && uv sync && cd ../frontend && pnpm install
 node scripts/import-sfx.mjs          # optional: local UI sounds (licensed, gitignored)
 ```
+
+Put your OpenAI key in `.env` at the repo root (`OPENAI_API_KEY=...`; see `.env.example`), then:
 
 ```bash
 uv run --project backend hexworld serve      # API on :8000
@@ -25,14 +27,25 @@ uv run --project backend hexworld serve      # API on :8000
 pnpm --dir frontend dev                      # UI on :5173
 ```
 
-Open http://localhost:5173 and click a hex. By default the fake LLM and the procedural stub renderer
-are used, so the whole pipeline (planning, waves, validation, review, retries, copies, telemetry)
-runs with no API keys or GPU. Copy `.env.example` to `.env` to switch to real backends:
+Open http://localhost:5173 and click a hex. Every role (super, tile agents, material artist, sprite
+artist) runs on a real model configured per role in `.env`. `hexworld models` lists what your key
+can use. Real responses are recorded, so `HEXWORLD_LLM=replay` can re-run a run for free.
 
-| | offline | real |
-|---|---|---|
-| LLM | `HEXWORLD_LLM=fake` | `openai` (+ `OPENAI_API_KEY`), or `replay` to re-run recorded runs for free |
-| Art | `HEXWORLD_IMAGE=stub` | `comfyui` (local open-source models, see `services/comfyui/`) or `openai` |
+## Nothing is prebaked
+
+The engine contains interpreters, not content:
+
+- **Material artist** (sub-agent) writes a *material program* for each terrain and connector: a
+  colour ramp plus pattern ops (patches, stripes, voronoi cells + bevel, cellfill, speckle, pixel
+  decals), boundary style (foam/glow/lip) and optional ambient scatter. `art/procedural.py`
+  renders it in world space, so tiles are seamless by construction.
+- **Sprite artist** (sub-agent) writes a *sprite program*: primitives (rect/ellipse/tri/line/pixel)
+  with colour-ramp tones, auto-shading, frames and a motion (sway/bob/flicker/pulse).
+  `art/sprites.py` rasterizes it with an outline into an animation strip.
+- Both go into the world's **session library**, which is designed once and reused by every later
+  tile. Concurrent requests for the same new asset are single-flighted.
+- Tiles are **layered**: a ground layer plus at most one landmark sprite in the middle. Dense
+  vegetation may add a few small scatter sprites. Sprites render as upright billboards.
 
 ## How a run works
 
