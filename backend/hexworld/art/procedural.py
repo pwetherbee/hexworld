@@ -55,7 +55,10 @@ def ramp_base(color: str) -> str:
     h, lum, sat = colorsys.rgb_to_hls(r / 255, g / 255, b / 255)
     if lum <= MAX_BASE_LUM:
         return color
-    r2, g2, b2 = colorsys.hls_to_rgb(h, MAX_BASE_LUM, sat)
+    # keep the chroma (HLS saturation means more colour at lower lightness): a creamy white must
+    # stay a pale cream, not turn lime
+    sat *= (1 - abs(2 * lum - 1)) / (1 - abs(2 * MAX_BASE_LUM - 1))
+    r2, g2, b2 = colorsys.hls_to_rgb(h, MAX_BASE_LUM, min(1.0, sat))
     return rgb_to_hex((round(r2 * 255), round(g2 * 255), round(b2 * 255)))
 
 
@@ -207,6 +210,16 @@ def grid_points(ctx: Ctx, cell: float, density: float, seed: float, jitter: floa
 TONES = list(RAMP_FACTORS)
 
 
+def _bands(ctx: Ctx, angle: float, period: float, seed: float) -> np.ndarray:
+    """Meandering bands (dunes, strata, ridgelines): a sine across `angle`, domain-warped by
+    low-frequency noise so the bands wander instead of ruling straight lines."""
+    a = math.radians(angle)
+    warp = (value_noise(ctx.bcx, ctx.bcy, period * 2.2, seed + 4.2) - 0.5) * period * 2.2
+    warp += (value_noise(ctx.bcx, ctx.bcy, period * 0.9, seed + 7.7) - 0.5) * period * 0.5
+    proj = ctx.bcx * math.cos(a) + ctx.bcy * math.sin(a) + warp
+    return np.sin(proj * (2 * math.pi / period))
+
+
 def paint_material(img: np.ndarray, m: np.ndarray, ctx: Ctx, spec: MaterialSpec, R: Ramp, name: str) -> None:
     img[m] = R[spec.base_tone]
     # engine-level texture so no block is a flat colour: 2px clusters one tone down/up (solids),
@@ -232,9 +245,7 @@ def paint_material(img: np.ndarray, m: np.ndarray, ctx: Ctx, spec: MaterialSpec,
             _, _, cid, _, _ = voronoi(ctx.bcx, ctx.bcy, max(op.scale, ctx.B * 1.5), seed)
             img[m & (cid < op.amount)] = color
         elif op.op == "stripes":
-            a = math.radians(op.angle)
-            period = max(op.scale, ctx.B * 2)
-            v = np.sin((ctx.bcx * math.cos(a) + ctx.bcy * math.sin(a)) * (2 * math.pi / period))
+            v = _bands(ctx, op.angle, max(op.scale, ctx.B * 2), seed)
             img[m & (v > 1 - 2 * op.amount * 0.5)] = color
         elif op.op == "speckle":  # pixel-level detail
             h = _hash(np.floor(ctx.wx), np.floor(ctx.wy), seed)
@@ -297,7 +308,7 @@ def material_heights(ctx: Ctx, spec: MaterialSpec, name: str) -> np.ndarray:
         elif op.op == "cellfill":
             sel = voronoi(ctx.bcx, ctx.bcy, scale, seed)[2] < op.amount
         elif op.op == "stripes":
-            sel = np.sin((ctx.bcx + ctx.bcy * 0.6) * (2 * math.pi / scale)) > 1 - 2 * op.amount * 0.5
+            sel = _bands(ctx, 30.0, scale, seed) > 1 - 2 * op.amount * 0.5
         else:  # speckle, per block
             sel = _hash(np.floor(ctx.bcx), np.floor(ctx.bcy), seed) < op.amount * 0.4
         h = np.where(sel, h + op.delta, h)
