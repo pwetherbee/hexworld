@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     # ---- concurrency
     llm_concurrency: int = 8
     image_concurrency: int = 2
+    tile_concurrency: int = 12  # tiles in flight at once (never two neighbours)
 
     # ---- validation thresholds
     max_seam_delta: float = 0.35  # 0..1, see art.pixelize.seam_delta; ~0.2 = continuous texture

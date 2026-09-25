@@ -40,19 +40,28 @@ async def test_full_run_fills_plan_with_valid_seams(make_runtime):
     assert w.spec and w.style and w.anchor_asset_ids
 
 
-async def test_waves_never_contain_adjacent_tiles_and_grow_outward(make_runtime):
-    rt = make_runtime()
+async def test_neighbours_are_never_in_flight_together_and_growth_starts_at_origin(make_runtime):
+    rt = make_runtime(llm=FakeClient(latency_s=0.01, reject_rate=0.3))
     world, run = await _run(rt, radius=3)
+    assert run.status == RunStatus.completed, run.error
     events = rt.store.list_events(run_id=run.id)
-    waves = next(e for e in events if e.type == "waves.scheduled").data["waves"]
-    rings = []
-    for wave in waves:
-        hexes = [Hex.parse(k) for k in wave]
-        for a in hexes:
-            for b in hexes:
-                assert a.distance(b) != 1
-        rings.append(max(h.distance(Hex(0, 0)) for h in hexes))
-    assert rings == sorted(rings)
+    spans: dict[Hex, list[tuple[float, float]]] = defaultdict(list)
+    started = {}
+    for e in events:
+        if e.type == "tile.job.started":
+            started[e.span_id] = (Hex(e.q, e.r), e.ts)
+        elif e.type == "tile.job.finished" and e.span_id in started:
+            h, t0 = started.pop(e.span_id)
+            spans[h].append((t0, e.ts))
+    for h, ivs in spans.items():
+        for i in range(6):
+            for a0, a1 in ivs:
+                for b0, b1 in spans.get(h.neighbor(i), []):
+                    assert a1 <= b0 or b1 <= a0, f"{h.key} overlapped its neighbour"
+    first = min(spans.items(), key=lambda kv: kv[1][0][0])[0]
+    assert first == Hex(0, 0)
+    anchor = next(e for e in events if e.type == "anchor.selected")
+    assert (anchor.q, anchor.r) == (0, 0)
 
 
 async def test_rejections_retry_with_feedback(make_runtime):
@@ -109,7 +118,7 @@ class FlatImages(ProceduralStubBackend):
 
 async def test_invalid_images_fail_after_attempts_plus_simplified(make_runtime):
     rt = make_runtime(image=FlatImages(latency_s=0))
-    world, run = await _run(rt, radius=1, max_attempts=2, anchor_candidates=1)
+    world, run = await _run(rt, radius=1, max_attempts=2)
     assert run.status == RunStatus.completed
     tiles = _tiles(rt, world)
     failed = [t for t in tiles.values() if t.status == TileStatus.failed]
@@ -173,12 +182,12 @@ async def test_reviewer_feedback_goes_back_to_the_same_tile_agent(make_runtime):
     assert any(turns >= {1, 2} for turns in by_tile.values())
 
 
-async def test_director_checks_in_between_rings(make_runtime):
+async def test_director_checks_in_during_growth(make_runtime):
     rt = make_runtime()
     _, run = await _run(rt, radius=3)
     events = rt.store.list_events(run_id=run.id)
     directs = [e for e in events if e.type == "super.direct.finished"]
-    assert len(directs) == 2  # after rings 1 and 2 (not after the last)
+    assert len(directs) >= 1  # every N accepted tiles while tiles are still pending
     assert any(e.type == "director.note" for e in events)
 
 
@@ -238,10 +247,12 @@ async def test_resume_after_crash(make_runtime, settings):
 async def test_material_feedback_goes_to_the_material_artist_and_repaints(make_runtime):
     class MaterialCritic(FakeClient):
         sent = False
+        reviews = 0
 
         def _wave_review(self, p, rng):
             out = super()._wave_review(p, rng)
-            if not self.sent and out["verdicts"]:
+            MaterialCritic.reviews += 1
+            if not self.sent and out["verdicts"] and MaterialCritic.reviews >= 3:  # once tiles exist
                 biome = p["candidates"][0]["directive"]["biome"]
                 out["verdicts"][0]["material_feedback"] = f"{biome}: more contrast between patches"
                 MaterialCritic.sent = True

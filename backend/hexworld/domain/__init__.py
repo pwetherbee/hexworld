@@ -405,7 +405,6 @@ class RunOptions(BaseModel):
         default=5, ge=1, le=8, description="How far from the clicked tile the super may expand."
     )
     max_attempts: int = Field(default=3, ge=1, le=6)
-    anchor_candidates: int = Field(default=3, ge=1, le=6)
     review_batch: int = Field(default=12, ge=1, le=16)
     max_llm_calls: int = Field(default=1500, ge=1)
     max_cost_usd: float = Field(default=2.0, gt=0)

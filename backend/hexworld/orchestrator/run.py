@@ -1,20 +1,22 @@
-"""Run executor: one user prompt → plan → anchor bootstrap → wave expansion with review.
+"""Run executor: one user prompt -> plan -> streaming growth with continuous review.
 
 State machine per tile:
-    planned → generating → reviewing → accepted
-                  ↑            │
-                  └── retry ───┘ (feedback)      → failed after max attempts (+1 simplified)
+    planned -> generating -> reviewing -> accepted
+                  ^              |
+                  +--- retry ----+ (feedback to the same agent)  -> failed after max attempts (+1 simplified)
 
-Waves: tiles are processed ring by ring outward from the origin; within a ring, by hex
-3-coloring class. No two tiles in a wave are adjacent, so every tile in a wave sees only
-already-accepted neighbors, and a wave can be generated fully in parallel and reviewed in
-one batched vision call.
+Growth (no rings, no wave barriers): a planned tile starts as soon as it touches an accepted tile
+(the origin starts first and becomes the world's style anchor) and none of its neighbours is in
+flight. Ready tiles are started in priority order: most accepted neighbours first, then the
+super's priority, then closeness to the origin. So the world grows organically along the plan, and
+every tile only ever sees settled neighbours. Candidates are reviewed in small batches while other
+tiles keep generating, and each acceptance immediately unlocks its neighbours. The director checks
+in every N accepted tiles.
 
 Agents (Google ADK, see agents/kit.py) collaborate through this executor: tile agents keep a
 session across attempts and receive the reviewer's feedback directly; artists revise their own
-sprites on the super's feedback; after each ring the super's director inspects the map and may
-re-plan the remaining tiles, commission sprites or order redos. The executor also exposes
-the facade those agents' tools call (surroundings, library, commission_sprite, map...).
+materials/sprites on the super's feedback; the director can re-plan pending tiles, commission
+sprites or order redos. The executor exposes the facade those agents' tools call.
 """
 
 from __future__ import annotations
@@ -121,7 +123,6 @@ class RunExecutor:
         self.tiles: dict[Hex, Tile] = {t.hex: t for t in self.store.list_tiles(world.id)}
         self._arrays: dict[str, np.ndarray] = {}
         self._budget_error: BudgetExceeded | None = None
-        self._deferred_copies: list[Tile] = []
         self._plan_notes: list[str] = []
         self._inflight: dict[str, asyncio.Future] = {}  # single-flight library generation
         self._sprite_arts: dict[str, SpriteArt] = {}
@@ -157,9 +158,7 @@ class RunExecutor:
                 else:
                     self._reset_inflight()
                 self._root = root
-                if not self.world.anchor_asset_ids:
-                    await self._bootstrap_anchor(root)
-                await self._expand(root)
+                await self._grow(root)
             self._finish(RunStatus.completed)
         except BudgetExceeded as e:
             self._finish(RunStatus.completed, error=f"budget: {e}")
@@ -906,172 +905,205 @@ class RunExecutor:
 
     # ================================================================== anchor bootstrap
 
-    async def _bootstrap_anchor(self, root: Span) -> None:
-        """Generate N renderings of the origin tile; the super picks the style anchor with vision.
-        Every later tile is conditioned on (and reviewed against) this anchor."""
-        tile = self._tile(self.origin)
-        if tile.status == TileStatus.accepted and tile.asset_id:
-            self.world.anchor_asset_ids = [tile.asset_id]
-            self.store.put_world(self.world)
-            return
-        if tile.directive is None:
-            return
-        k = self.run.options.anchor_candidates
-        jobs = [Job(tile, tile.directive) for _ in range(k)]  # k independent tile agents
-        async with self.tracer.span("anchor.bootstrap", root, q=tile.q, r=tile.r, candidates=k) as sp:
-            cands = await asyncio.gather(*[self._produce(j, sp, variant=i) for i, j in enumerate(jobs)])
-            self._raise_budget()
-            good = [c for c in cands if c is not None and c.checks.ok]
-            if not good:
-                sp.set(outcome="no valid candidates; origin falls back to normal waves")
-                tile.status = TileStatus.planned
-                self._save_tile(tile)
-                return
-            if len(good) == 1:
-                best = good[0]
-            else:
-                try:
-                    pick = await super_agent.pick_anchor(
-                        self.kit,
-                        world=self.world,
-                        intent=tile.directive.intent,
-                        candidates=[c.flat_png or c.pix.png for c in good],
-                        parent=sp,
-                    )
-                    best = good[pick.best_label - 1]
-                    sp.set(pick_reason=pick.reason, picked=pick.best_label)
-                except BudgetExceeded:
-                    raise
-                except Exception as e:  # noqa: BLE001 - degrade: first valid candidate wins
-                    sp.set(pick_error=str(e)[:200])
-                    best = good[0]
-            for c in good:
-                if c is not best:
-                    c.attempt.outcome = "rejected"
-                    c.attempt.verdict = None
-                    self.store.put_attempt(c.attempt)
-            self._accept(best, None)
-            self.world.anchor_asset_ids = [best.asset_id]
-            self.store.put_world(self.world)
-            self.tracer.emit("anchor.selected", q=tile.q, r=tile.r, data={"asset_id": best.asset_id})
+    # ================================================================== streaming growth
 
-    # ================================================================== waves
-
-    def _waves(self, ring: int | None = None) -> list[list[Tile]]:
-        pending = [
-            t
-            for t in self.tiles.values()
-            if t.run_id == self.run.id
-            and t.status == TileStatus.planned
-            and t.directive is not None
-            and (ring is None or t.hex.distance(self.origin) == ring)
-        ]
-        groups: dict[tuple[int, int], list[Tile]] = defaultdict(list)
-        for t in pending:
-            groups[(t.hex.distance(self.origin), t.hex.color3())].append(t)
-        return [groups[k] for k in sorted(groups)]
-
-    async def _expand(self, root: Span) -> None:
-        """Ring by ring outward. After each ring (while more remain) the super's director checks in
-        and may re-plan the rest; any redos it orders are regenerated before moving on."""
-        max_ring = max(
-            (
-                t.hex.distance(self.origin)
-                for t in self.tiles.values()
-                if t.run_id == self.run.id and t.status == TileStatus.planned
-            ),
-            default=-1,
+    def _score(self, t: Tile) -> float:
+        accepted_nb = sum(
+            1
+            for n in t.hex.neighbors()
+            if (nt := self.tiles.get(n)) is not None and nt.status == TileStatus.accepted
         )
-        self.tracer.emit("waves.scheduled", data={"waves": [[t.key for t in w] for w in self._waves()]})
-        wave_index = 0
-        for ring in range(max_ring + 1):
-            for wave in self._waves(ring):
-                async with self.tracer.span(
-                    "wave",
-                    root,
-                    index=wave_index,
-                    ring=ring,
-                    color=wave[0].hex.color3(),
-                    tiles=[t.key for t in wave],
-                ) as sp:
-                    await self._run_wave(wave, sp)
-                wave_index += 1
-                self.store.put_run(self.run)
-                self._emit_stats()
-            if ring < max_ring and ring >= 1:
-                await self._direct(ring, max_ring, root)
-                if self._redo:
-                    redo, self._redo = self._redo, []
-                    groups: dict[int, list[Tile]] = defaultdict(list)
-                    for t in redo:
-                        groups[t.hex.color3()].append(t)
-                    for color in sorted(groups):
-                        async with self.tracer.span(
-                            "wave",
-                            root,
-                            index=f"redo-{ring}.{color}",
-                            ring=ring,
-                            color=color,
-                            tiles=[t.key for t in groups[color]],
-                        ) as sp:
-                            await self._run_wave(groups[color], sp)
-        # Copies whose prototype was not ready in their own wave (it sits further out, or it
-        # failed) get one more pass. Anything still unresolved is generated normally.
-        if self._deferred_copies:
-            deferred, self._deferred_copies = self._deferred_copies, []
-            dgroups: dict[tuple[int, int], list[Tile]] = defaultdict(list)
-            for t in deferred:
-                dgroups[(t.hex.distance(self.origin), t.hex.color3())].append(t)
-            for key in sorted(dgroups):
-                async with self.tracer.span(
-                    "wave",
-                    root,
-                    index=f"deferred-{key[0]}.{key[1]}",
-                    ring=key[0],
-                    color=key[1],
-                    tiles=[t.key for t in dgroups[key]],
-                ) as sp:
-                    await self._run_wave(dgroups[key], sp, final=True)
-            self.store.put_run(self.run)
-            self._emit_stats()
+        prio = 3
+        if self.run.plan:
+            prio = next((pt.priority for pt in self.run.plan.tiles if (pt.q, pt.r) == (t.q, t.r)), 3)
+        return (
+            accepted_nb * 10
+            + prio * 2
+            - t.hex.distance(self.origin) * 0.6
+            + (100 if t.hex == self.origin else 0)
+        )
 
-    async def _direct(self, ring: int, max_ring: int, root: Span) -> None:
-        async with self.tracer.span("super.direct", root, ring=ring) as sp:
+    def _ready(self, pending: dict[Hex, Tile], busy: set[Hex]) -> list[Tile]:
+        world_started = any(t.status == TileStatus.accepted for t in self.tiles.values())
+        out = []
+        for t in pending.values():
+            if any(n in busy for n in t.hex.neighbors()):
+                continue
+            touching = any(
+                (nt := self.tiles.get(n)) is not None and nt.status == TileStatus.accepted
+                for n in t.hex.neighbors()
+            )
+            if not (touching or (not world_started and t.hex == self.origin)):
+                continue
+            spec = t.directive.duplicate if t.directive else None
+            if spec is not None:
+                src = self.tiles.get(spec.source)
+                if src is not None and src.status in ACTIVE_STATUSES:
+                    continue  # a copy waits for its prototype to settle
+            out.append(t)
+        return sorted(out, key=self._score, reverse=True)
+
+    async def _grow(self, root: Span) -> None:
+        pending: dict[Hex, Tile] = {
+            t.hex: t
+            for t in self.tiles.values()
+            if t.run_id == self.run.id and t.status == TileStatus.planned and t.directive is not None
+        }
+        inflight: dict[Hex, asyncio.Task] = {}
+        self._wake = asyncio.Event()
+        self._review_ready = asyncio.Event()
+        self._review_q = []
+        self._review_sem = asyncio.Semaphore(2)
+        reviewer = asyncio.create_task(self._review_loop(root))
+        cap = max(1, self.s.tile_concurrency)
+        direct_every = max(6, len(pending) // 4)
+        since_direct = 0
+        self.tracer.emit(
+            "growth.scheduled", data={"pending": len(pending), "concurrency": cap, "direct_every": direct_every}
+        )
+        try:
+            while pending or inflight:
+                self._raise_budget()
+                busy = set(inflight)
+                for t in self._ready(pending, busy):
+                    if len(inflight) >= cap:
+                        break
+                    if any(n in busy for n in t.hex.neighbors()):
+                        continue
+                    pending.pop(t.hex)
+                    busy.add(t.hex)
+                    inflight[t.hex] = asyncio.create_task(self._job(t, root))
+                if not inflight:
+                    if not pending:
+                        break
+                    # Nothing touches the settled world (e.g. a separate island): seed the best one.
+                    t = max(pending.values(), key=self._score)
+                    pending.pop(t.hex)
+                    inflight[t.hex] = asyncio.create_task(self._job(t, root))
+                    continue
+                await self._wake.wait()
+                self._wake.clear()
+                for h, task in list(inflight.items()):
+                    if not task.done():
+                        continue
+                    inflight.pop(h)
+                    exc = task.exception()
+                    if exc is not None:
+                        raise exc
+                    if task.result() == "accepted":
+                        since_direct += 1
+                    self.store.put_run(self.run)
+                    self._emit_stats()
+                if since_direct >= direct_every and pending:
+                    since_direct = 0
+                    await self._direct(root)
+                    for t in self._redo:
+                        pending[t.hex] = t
+                    self._redo = []
+                    for h in [h for h, t in pending.items() if t.status != TileStatus.planned]:
+                        pending.pop(h)  # the director dropped it
+        finally:
+            for task in inflight.values():
+                task.cancel()
+            reviewer.cancel()
+            for task in [*inflight.values(), reviewer]:
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+
+    async def _job(self, t: Tile, root: Span) -> str:
+        """One tile from start to a terminal state; its agent session persists across attempts."""
+        assert t.directive is not None
+        job = Job(t, t.directive)
+        try:
+            async with self.tracer.span("tile.job", root, q=t.q, r=t.r) as jsp:
+                if job.directive.duplicate is not None:
+                    if await self._resolve_copy(job, jsp, final=True) == "copied":
+                        jsp.set(outcome="copied")
+                        return "accepted"
+                while True:
+                    cand = await self._produce(job, jsp)
+                    if self._budget_error is not None:
+                        return "budget"
+                    if cand is not None and cand.checks.ok:
+                        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+                        self._review_q.append((cand, fut))
+                        self._review_ready.set()
+                        v = await fut
+                        if v is None or v.accept:
+                            self._accept(cand, v)
+                            await self._refresh_if_stale(cand)
+                            jsp.set(outcome="accepted", attempts=job.attempts_this_run)
+                            return "accepted"
+                        cand.attempt.verdict = v
+                        cand.attempt.outcome = "rejected"
+                        self.store.put_attempt(cand.attempt)
+                        self.run.stats.rejections_review += 1
+                        job.feedback = v.feedback or "rejected by the reviewer; improve it"
+                        job.directive.feedback.append(job.feedback)
+                    elif cand is not None:
+                        job.feedback = f"automatic checks failed: {cand.checks.feedback}"
+                        job.directive.feedback.append(cand.checks.feedback)
+                    if not self._retry_or_fail(job, self.run.options.max_attempts):
+                        jsp.set(outcome="failed", attempts=job.attempts_this_run)
+                        return "failed"
+        finally:
+            self._wake.set()
+
+    async def _review_loop(self, parent: Span) -> None:
+        """Continuous reviewer: waits a moment so near-simultaneous candidates share one call, then
+        reviews up to `review_batch` at a time (at most two batches in parallel)."""
+        while True:
+            await self._review_ready.wait()
+            self._review_ready.clear()
+            await asyncio.sleep(0.5)
+            while self._review_q:
+                batch = self._review_q[: self.run.options.review_batch]
+                del self._review_q[: len(batch)]
+                await self._review_sem.acquire()
+                asyncio.create_task(self._review_batch(batch, parent))
+
+    async def _review_batch(self, batch: list[tuple[Candidate, asyncio.Future]], parent: Span) -> None:
+        try:
+            verdicts: dict[Hex, Verdict] = {}
+            try:
+                verdicts = await self._review_chunk([c for c, _ in batch], parent)
+            except BudgetExceeded as e:
+                self._budget_error = e
+            except Exception:  # noqa: BLE001 - deterministic checks already passed: accept
+                verdicts = {}
+            for c, fut in batch:
+                if not fut.done():
+                    fut.set_result(verdicts.get(c.job.tile.hex))
+        finally:
+            self._review_sem.release()
+
+    async def _direct(self, root: Span) -> None:
+        accepted = sum(
+            1 for t in self.tiles.values() if t.run_id == self.run.id and t.status == TileStatus.accepted
+        )
+        async with self.tracer.span("super.direct", root, accepted=accepted) as sp:
             try:
                 note = await director.direct(
                     self.kit,
                     api=self,
                     world=self.world,
-                    ring=ring,
-                    rings_total=max_ring,
+                    ring=accepted,
+                    rings_total=self.run.stats.tiles_planned,
                     notes=self._director_notes,
                     parent=sp,
                 )
             except BudgetExceeded as e:
                 self._budget_error = e
-                self._raise_budget()
                 return
             except Exception as e:  # noqa: BLE001 - the build continues as planned
                 sp.set(error=str(e)[:200])
                 return
             if note:
-                self._director_notes.append(f"after ring {ring}: {note}")
+                self._director_notes.append(f"after {accepted} tiles: {note}")
                 sp.set(note=note[:300])
-                self.tracer.emit("director.note", data={"ring": ring, "note": note})
-
-    async def _run_wave(self, wave: list[Tile], wave_span: Span, final: bool = False) -> None:
-        jobs = [Job(t, t.directive) for t in wave if t.directive is not None]  # type: ignore[arg-type]
-        copy_jobs = [j for j in jobs if j.directive.duplicate is not None]
-        await self._generate([j for j in jobs if j.directive.duplicate is None], wave_span)
-        # Copies resolve after the wave's generated tiles, so a prototype can be in the same wave.
-        fallbacks = []
-        for j in copy_jobs:
-            outcome = await self._resolve_copy(j, wave_span, final)
-            if outcome == "fallback":
-                fallbacks.append(j)
-            elif outcome == "deferred":
-                self._deferred_copies.append(j.tile)
-        await self._generate(fallbacks, wave_span)
+                self.tracer.emit("director.note", data={"accepted": accepted, "note": note})
 
     async def _resolve_copy(self, job: Job, parent: Span, final: bool) -> str:
         t, spec = job.tile, job.directive.duplicate
@@ -1127,35 +1159,6 @@ class RunExecutor:
             t.directive = job.directive
             self._save_tile(t)
             return "fallback"
-
-    async def _generate(self, active: list[Job], wave_span: Span) -> None:
-        opts = self.run.options
-        while active:
-            results = await asyncio.gather(*[self._produce(j, wave_span) for j in active])
-            self._raise_budget()
-            candidates = [c for c in results if c is not None and c.checks.ok]
-            verdicts = await self._review(candidates, wave_span) if candidates else {}
-
-            next_active: list[Job] = []
-            for job, cand in zip(active, results, strict=True):
-                if cand is not None and cand.checks.ok:
-                    v = verdicts.get(job.tile.hex)
-                    if v is None or v.accept:
-                        self._accept(cand, v)
-                        await self._refresh_if_stale(cand)
-                        continue
-                    cand.attempt.verdict = v
-                    cand.attempt.outcome = "rejected"
-                    self.store.put_attempt(cand.attempt)
-                    self.run.stats.rejections_review += 1
-                    job.feedback = v.feedback or "rejected by the reviewer; improve it"
-                    job.directive.feedback.append(job.feedback)
-                elif cand is not None:
-                    job.feedback = f"automatic checks failed: {cand.checks.feedback}"
-                    job.directive.feedback.append(cand.checks.feedback)
-                if self._retry_or_fail(job, opts.max_attempts):
-                    next_active.append(job)
-            active = next_active
 
     def _retry_or_fail(self, job: Job, max_attempts: int) -> bool:
         t = job.tile
@@ -1523,6 +1526,10 @@ class RunExecutor:
         c.attempt.verdict = verdict
         self.store.put_attempt(c.attempt)
         self.run.stats.tiles_accepted += 1
+        if not self.world.anchor_asset_ids:
+            self.world.anchor_asset_ids = [c.asset_id]
+            self.store.put_world(self.world)
+            self.tracer.emit("anchor.selected", q=t.q, r=t.r, data={"asset_id": c.asset_id})
         self.tracer.emit(
             "tile.accepted",
             q=t.q,
