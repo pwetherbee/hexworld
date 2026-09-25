@@ -24,7 +24,6 @@ const RIM_GEO = new THREE.BufferGeometry().setFromPoints(hexOutlinePoints(0.995,
 const NO_RAYCAST = () => undefined;
 const SHADOW_GEO = new THREE.CircleGeometry(0.5, 20);
 const SPRITE_GEO = new THREE.PlaneGeometry(1, 1).translate(0, 0.5, 0); // anchored at the bottom
-const GOLD = new THREE.Color("#fbbf24");
 
 // All accepted tiles share one height: relief lives in the art (heightmap layer), so neighbouring
 // faces meet flush and the ground reads as one continuous surface.
@@ -230,13 +229,13 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
     U.uGlitch.value = recentlyRejected ? 1 - (now - rejectedAt) / FLASH_MS : 0;
     formingMat.depthWrite = U.uState.value > 0.5;
 
-    // rim: traces the hex in the palette's light tone while forming, gold while reviewed
+    // rim: traces the hex in the palette (light while forming, a slow highlight breath under review)
     if (rim.current && rimMat.current) {
       rim.current.visible = U.uState.value > 0.5;
       rim.current.position.y = ph + 0.006;
       const reviewing = status === "reviewing";
-      rimMat.current.color.copy(reviewing ? GOLD : U.uPal.value[4]);
-      rimMat.current.opacity = (reviewing ? 0.75 : 0.45) + 0.25 * Math.sin(t * (reviewing ? 3.2 : 5.0));
+      rimMat.current.color.copy(U.uPal.value[reviewing ? 4 : 3]);
+      rimMat.current.opacity = (reviewing ? 0.55 : 0.45) + 0.2 * Math.sin(t * (reviewing ? 1.6 : 5.0));
     }
   });
 

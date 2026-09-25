@@ -128,11 +128,13 @@ void main() {
       vec4 tx = texture2D(uMap, uv);
       float shown = step(h2, uReveal) * step(0.5, tx.a);
       col = mix(col, tx.rgb, shown);
-      // review: a thin gold line sweeping north to south, cells lighting up as it passes
-      float yline = fract(uTime * 0.35);
-      float d = abs(vUv.y - (1.0 - yline));
-      col += uScan * (1.0 - smoothstep(0.0, 0.012, d)) * vec3(1.0, 0.78, 0.3) * 0.9;
-      col += uScan * (1.0 - smoothstep(0.012, 0.06, d)) * vec3(1.0, 0.8, 0.35) * 0.12;
+      // review: a slow diagonal wave of 2px art cells flips one shade toward the tile's own
+      // highlight as it passes (with dropout, so it reads as pixels flipping, not a light bar)
+      float diag = (art.x + (33.5 - art.y)) / 67.0;          // 0..1, NW -> SE
+      float wave = fract(diag - uTime * 0.22);
+      float inBand = step(wave, 0.09) * step(0.35, h21(art + floor(uTime * 6.0) * 0.61));
+      float trail = step(wave, 0.2) * step(0.8, h21(art * 1.7 + floor(uTime * 4.0)));
+      col = mix(col, uPal[4], uScan * (0.38 * inBand + 0.18 * trail));
     }
     // rejection tint
     col = mix(col, vec3(0.9, 0.12, 0.1) * (0.6 + 0.4 * h), uGlitch * 0.55 * step(0.5, h2 + 0.2));
