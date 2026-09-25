@@ -88,6 +88,7 @@ class Runtime:
                 base_url=settings.openai_base_url,
                 model=settings.sprite_image_model,
                 quality=settings.sprite_image_quality,
+                concurrency=settings.paint_concurrency,
             )
         self.llm_name = "fake" if settings.llm == "fake" or model_factory else f"adk+{settings.llm}"
         self.image = image or build_image(settings)

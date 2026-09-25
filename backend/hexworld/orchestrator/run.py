@@ -162,6 +162,7 @@ class RunExecutor:
         self._waiting: set[Hex] = set()  # rejected tiles waiting for busy neighbours before redesigning
         self._bg: set[asyncio.Task] = set()  # fire-and-forget library work (kept referenced)
         self._early: dict[Hex, asyncio.Task] = {}  # the origin, started from the plan header
+        self._commissioned: set[str] = set()  # sprite kinds commissioned this run
         self.origin = run.origin.hex
 
     # ================================================================== lifecycle
@@ -278,6 +279,7 @@ class RunExecutor:
                 on_header=self._on_header,
             )
             plan = self._apply_plan(plan)
+            self._prefetch_sprites(plan.tiles)
             sp.set(
                 planned=sum(1 for t in plan.tiles if not t.leave_empty),
                 left_empty=sum(1 for t in plan.tiles if t.leave_empty),
@@ -311,6 +313,7 @@ class RunExecutor:
             return
         self._busy.add(self.origin)
         self._early[self.origin] = asyncio.create_task(self._job(t, self._root))
+        self._prefetch_sprites(header.tiles)
 
     def _apply_plan(self, plan: WorldPlan) -> WorldPlan:
         w = self.world
@@ -491,7 +494,7 @@ class RunExecutor:
 
     async def _ensure_sprite(self, kind: str, context: str, parent: Span | None) -> SpriteEntry | None:
         w = self.world
-        key = kind_key(kind)
+        key = self._canonical_kind(kind)
         if key in w.sprites:
             return w.sprites[key]
 
@@ -684,7 +687,7 @@ class RunExecutor:
     async def _revise_sprite(self, kind: str, feedback: str, parent: Span | None) -> None:
         """Agent-to-agent: route the super's sprite feedback to the artist who drew it; swap the new
         version into the library and into every tile of this run that shows it."""
-        key = kind_key(kind)
+        key = self._canonical_kind(kind)
         old = self.world.sprites.get(key)
         if old is None:
             return
@@ -817,12 +820,47 @@ class RunExecutor:
         }
 
     def sprite_entry(self, kind: str) -> tuple[SpriteEntry | None, bytes | None]:
-        e = self.world.sprites.get(kind_key(kind))
+        e = self.world.sprites.get(self._canonical_kind(kind))
         return (e, preview_png(self._sprite_art(e), scale=6)) if e is not None else (None, None)
 
-    def commission_sprite_later(self, kind: str, brief: str) -> None:
-        """Start painting in the background; the tile's layer step joins it (single-flight)."""
-        self._background(self._ensure_sprite(kind, brief, self._root))
+    def sprite_kinds(self) -> list[str]:
+        """Kinds in the library or being painted right now (tile agents should reuse these)."""
+        return sorted(self._known_kinds())
+
+    def commission_sprite_later(self, kind: str, brief: str) -> str:
+        """Start painting in the background; the tile's layer step joins it (single-flight).
+        Returns the canonical kind (an existing near-duplicate is reused)."""
+        key = self._canonical_kind(kind)
+        if key not in self.world.sprites and key not in self._commissioned:
+            self._commissioned.add(key)
+            self._background(self._ensure_sprite(key, brief, self._root))
+        return key
+
+    def _known_kinds(self) -> set[str]:
+        inflight = {k[2:] for k in self._inflight if k.startswith("s:")}
+        return set(self.world.sprites) | inflight | self._commissioned
+
+    def _canonical_kind(self, kind: str) -> str:
+        """Library key for a requested kind. A near-duplicate of a known kind (same head noun, and
+        one's words contained in the other's: 'old apple tree' ~ 'apple tree') reuses it, so the
+        world repeats one coherent sprite instead of painting variants."""
+        return canonical_kind(kind, self._known_kinds())
+
+    def _prefetch_sprites(self, tiles: list[PlannedTile]) -> None:
+        """The super committed to these features in its plan: artists start painting them now,
+        in parallel, instead of when each tile agent gets to them."""
+        if not self.s.prefetch_sprites:
+            return
+        w = self.world
+        for pt in tiles:
+            if pt.leave_empty or pt.duplicate.mode != "none":
+                continue
+            for f in pt.features[:4]:
+                if f.strip():
+                    title = w.spec.title if w.spec else ""
+                    self.commission_sprite_later(
+                        f, f"{f}: for a tile that is '{pt.intent}' ({pt.biome}), in {title}"
+                    )
 
     async def commission_sprite(self, kind: str, brief: str, q: int | None, r: int | None):
         entry = await self._ensure_sprite(kind, brief, self._root)
@@ -1691,7 +1729,7 @@ class RunExecutor:
                     if layer.kind == "sprite"
                 ],
                 "missing_props": sorted(
-                    {kind_key(p.kind) for p in c.design.props}
+                    {self._canonical_kind(p.kind) for p in c.design.props}
                     - {layer.label for layer in c.layers if layer.kind == "sprite"}
                 ),
                 "metrics": {
@@ -1904,6 +1942,29 @@ def _zoom_png(c: Candidate) -> bytes:
     flat = c.flat if c.flat is not None else c.pix.rgba
     img = Image.fromarray(flat, "RGBA")
     return to_png(img.resize((img.width * 8, img.height * 8), Image.Resampling.NEAREST))
+
+
+def canonical_kind(kind: str, known: set[str]) -> str:
+    """Library key for a requested sprite kind: the exact key if known, else a known near-duplicate
+    (same head noun, and one's words contained in the other's), else the new key."""
+    key = kind_key(kind)
+    if key in known:
+        return key
+    words = _kind_words(key)
+    for other in sorted(known, key=len):
+        ow = _kind_words(other)
+        if ow and words and _head(other) == _head(key) and (ow <= words or words <= ow):
+            return other
+    return key
+
+
+def _kind_words(key: str) -> set[str]:
+    return {w[:-1] if len(w) > 3 and w.endswith("s") else w for w in key.split()}
+
+
+def _head(key: str) -> str:
+    w = key.split()[-1] if key.split() else ""
+    return w[:-1] if len(w) > 3 and w.endswith("s") else w
 
 
 def _merge_palette(palette: list[str], extra: list[str], cap: int = 128) -> list[str]:

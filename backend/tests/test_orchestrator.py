@@ -288,3 +288,24 @@ async def test_origin_starts_building_while_the_rest_is_planned(make_runtime):
     tiles = {t.hex: t for t in rt.store.list_tiles(world.id)}
     assert tiles[Hex(0, 0)].status == TileStatus.accepted
     assert run.stats.tiles_accepted == run.stats.tiles_planned
+
+
+def test_near_duplicate_sprite_kinds_reuse_the_library():
+    from hexworld.orchestrator.run import canonical_kind
+
+    known = {"apple tree", "maple tree", "reed bed", "stone wall"}
+    assert canonical_kind("Old Apple Tree", known) == "apple tree"
+    assert canonical_kind("red maple trees", known) == "maple tree"
+    assert canonical_kind("apple", known) == "apple"  # different head noun
+    assert canonical_kind("marsh reeds", known) == "marsh reeds"  # not a near-duplicate of 'reed bed'
+    assert canonical_kind("low stone wall", known) == "stone wall"
+
+
+async def test_plan_features_are_commissioned_before_tiles_ask_for_them(make_runtime):
+    rt = make_runtime(llm=FakeClient(latency_s=0.02, reject_rate=0))
+    world, run = await _run(rt, radius=2)
+    assert run.status == RunStatus.completed, run.error
+    events = rt.store.list_events(run_id=run.id)
+    first_sprite = next((e for e in events if e.type == "library.sprite.started"), None)
+    first_layers = next(e for e in events if e.type == "tile.layers.started")
+    assert first_sprite is not None and first_sprite.id < first_layers.id

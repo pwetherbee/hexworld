@@ -41,6 +41,8 @@ Keep each tile's intent short (<= 12 words).
   interest: 'obsidian watchtower', 'lava geyser') plus up to 3 small props that tell its story
   ('ore cart', 'bone pile', 'banner'). Villages, camps and ruins read best as small scenes of 2-4
   sprites; open terrain usually has none (about half the tiles). The terrain carries the look.
+  Write each feature as a short sprite kind name (2-3 words, singular, no counts or verbs:
+  'apple tree', not '3 apple trees swaying'): artists start painting them from your plan at once.
   Reuse a small set of sprite kinds across the map (about 6-14 distinct kinds per world, e.g.
   several 'obsidian watchtower's along a road), so every kind is designed once and repeats coherently.
 - duplicate: to save cost, reuse a tile instead of generating it. Good candidates are repetitive

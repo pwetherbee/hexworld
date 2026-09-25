@@ -241,7 +241,7 @@ class TileAgent:
             "neighbors": compact,
         }
         if self.directive.features:
-            payload["sprite_library"] = sorted(w.sprites)
+            payload["sprite_library"] = self.api.sprite_kinds()  # painted or being painted
         res = await self.handle.run([text_part(payload)], parent, max_calls=6)
         return res.get("design")
 

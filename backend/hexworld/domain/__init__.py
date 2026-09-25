@@ -237,14 +237,20 @@ NO_COPY = CopySpec(mode="none", source_q=0, source_r=0)
 class PlannedTile(BaseModel):
     q: int
     r: int
-    leave_empty: bool = Field(description="True to deliberately leave this slot empty.")
+    # optional fields have defaults: a model that omits one must not cost a failed tool call
+    leave_empty: bool = Field(default=False, description="True to deliberately leave this slot empty.")
     biome: str = Field(description="Dominant terrain, from terrain_vocabulary.")
     intent: str = Field(description="One sentence: what this tile is and its role in the world.")
-    features: list[str] = Field(description="Notable features/props, e.g. 'ruined tower', 'pine trees'.")
-    edge_hints: list[EdgeHint] = Field(description="Edge constraints the super wants (may be partial).")
-    priority: int = Field(description="1 (low) .. 5 (high); higher is generated earlier within its wave.")
+    features: list[str] = Field(
+        default_factory=list, description="Notable features/props, e.g. 'ruined tower', 'pine trees'."
+    )
+    edge_hints: list[EdgeHint] = Field(
+        default_factory=list, description="Edge constraints the super wants (may be partial)."
+    )
+    priority: int = Field(default=3, description="1 (low) .. 5 (high); higher is generated earlier.")
     duplicate: CopySpec = Field(
-        description="Copy another tile instead of generating (mode 'none' to generate)."
+        default_factory=lambda: CopySpec(mode="none", source_q=0, source_r=0),
+        description="Copy another tile instead of generating (mode 'none' to generate).",
     )
 
     @property

@@ -7,6 +7,7 @@ subject, box-downsample to a target height, reduce to a small colour set, hard a
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 from typing import Any
@@ -75,16 +76,24 @@ def style_frame(style: Any, subject: str) -> str:
 
 
 class OpenAISpritePainter:
-    def __init__(self, *, api_key: str | None, base_url: str | None, model: str, quality: str):
+    def __init__(
+        self, *, api_key: str | None, base_url: str | None, model: str, quality: str, concurrency: int = 6
+    ):
         from openai import AsyncOpenAI
 
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, max_retries=2, timeout=120)
         self.model = model
         self.quality = quality
+        self._sem = asyncio.Semaphore(max(1, concurrency))
 
     async def paint(self, prompt: str) -> tuple[bytes, dict[str, int]]:
         """-> (png, usage) where usage has text/image input and output token counts."""
-        r = await self._client.images.generate(
+        async with self._sem:
+            r = await self._generate(prompt)
+        return self._result(r)
+
+    async def _generate(self, prompt: str) -> Any:
+        return await self._client.images.generate(
             model=self.model,
             prompt=prompt,
             size="1024x1024",
@@ -92,6 +101,8 @@ class OpenAISpritePainter:
             background="transparent",
             n=1,
         )
+
+    def _result(self, r: Any) -> tuple[bytes, dict[str, int]]:
         b64 = r.data[0].b64_json
         if not b64:
             raise RuntimeError("image model returned no image")
