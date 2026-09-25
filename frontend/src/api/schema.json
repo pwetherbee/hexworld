@@ -1589,6 +1589,22 @@
             "pulse"
           ],
           "type": "string"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "enum": [
+                "landmark",
+                "prop",
+                "scatter"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1602,7 +1618,8 @@
         "px_h",
         "frames",
         "fps",
-        "motion"
+        "motion",
+        "role"
       ],
       "title": "TileLayer",
       "type": "object"

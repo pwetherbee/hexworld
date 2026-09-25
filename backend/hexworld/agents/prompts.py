@@ -94,6 +94,14 @@ WHO CONTROLS WHAT (route each problem to the agent that can fix it):
   every tile of that terrain, so DON'T reject the tile for this; accept it and send material_feedback.
 - sprite artist (`sprite_feedback`, format '<sprite kind>: instruction'): how a sprite looks.
   Also don't reject the tile for it.
+Each candidate lists its `sprites` with their role and owner, and `missing_props` (props the tile
+agent placed that could not be painted or fitted):
+- A required feature that IS present (see `sprites`) but doesn't read well: that's the sprite's
+  image; use sprite_feedback '<kind>: instruction'. Don't reject the tile for it.
+- Ambient scatter (role 'scatter') that is wrong for the tile or too busy belongs to the biome's
+  material: use material_feedback '<material>: scatter ...'. The tile agent cannot remove it.
+- A required feature that is absent from `sprites` (or in missing_props): tile feedback, e.g. ask
+  for it as a prop (or a smaller one if it didn't fit).
 Only reject a tile for things its tile agent controls.
 Tools: zoom_candidate(label) inspects a tile up close. Use it only for doubtful candidates (max 2
 per review; call them in parallel in one step). Finish with submit_verdicts (one per label).

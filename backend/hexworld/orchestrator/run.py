@@ -953,7 +953,8 @@ class RunExecutor:
             (p.kind, p.x, p.y, p.scale, ctx, "prop") for p in design.props[:MAX_PROPS]
         ]
         mat = self.world.materials.get(design.biome)
-        if mat is not None and len(wanted) < MAX_SPRITES:
+        plain = bool(t.directive and t.directive.simplified)  # last-resort 'plain terrain' attempt
+        if mat is not None and len(wanted) < MAX_SPRITES and not plain:
             for kind, x, y, sc in scatter_positions(mat.scatter, (t.q, t.r), variant):
                 if len(wanted) >= MAX_SPRITES:
                     break
@@ -995,6 +996,7 @@ class RunExecutor:
                     frames=e.frames,
                     fps=e.fps,
                     motion=e.motion,
+                    role=sl.role,  # type: ignore[arg-type]
                 )
             )
         flat = flatten(self._shaded(ground.rgba, height_id), placed, canvas)
@@ -1671,10 +1673,27 @@ class RunExecutor:
                 },
                 "design": {
                     "summary": c.design.summary,
-                    "landmark": next((layer.label for layer in c.layers if layer.kind == "sprite"), None),
                     "art_prompt": c.design.art_prompt,
                     "edges": [e.model_dump() for e in c.design.edges],
                 },
+                # what stands on the tile and who owns it (route sprite problems accordingly)
+                "sprites": [
+                    {
+                        "kind": layer.label,
+                        "role": layer.role,
+                        **(
+                            {"owner": f"ambient scatter of the '{c.design.biome}' material"}
+                            if layer.role == "scatter"
+                            else {"owner": "tile agent's prop; the image is the sprite artist's"}
+                        ),
+                    }
+                    for layer in c.layers
+                    if layer.kind == "sprite"
+                ],
+                "missing_props": sorted(
+                    {kind_key(p.kind) for p in c.design.props}
+                    - {layer.label for layer in c.layers if layer.kind == "sprite"}
+                ),
                 "metrics": {
                     "seam_delta": c.checks.metrics.get("seam_delta", {}),
                     "distinct_colors": c.checks.metrics.get("distinct_colors"),

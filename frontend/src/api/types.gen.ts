@@ -418,6 +418,7 @@ export interface TileLayer {
   frames: number;
   fps: number;
   motion: "none" | "sway" | "bob" | "flicker" | "pulse";
+  role: ("landmark" | "prop" | "scatter") | null;
 }
 /**
  * This interface was referenced by `ApiSchemas`'s JSON-Schema

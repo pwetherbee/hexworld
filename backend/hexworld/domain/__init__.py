@@ -362,6 +362,9 @@ class TileLayer(BaseModel):
     frames: int = 1
     fps: float = 0.0
     motion: Literal["none", "sway", "bob", "flicker", "pulse"] = "none"
+    # sprites: who put it there. landmark/prop = the tile agent's props; scatter = the biome
+    # material's ambient scatter (owned by the material artist)
+    role: Literal["landmark", "prop", "scatter"] | None = None
 
 
 class Tile(BaseModel):

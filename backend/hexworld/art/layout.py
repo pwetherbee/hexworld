@@ -70,6 +70,21 @@ def _overlap(a: PropSlot, x: float, y: float, w: float, h: float) -> float:
     return (ox * oy) / max(1e-6, min(a.w * a.h, w * h))
 
 
+def _nearest_free(
+    x0: float, y0: float, w: float, h: float, placed: list[PropSlot], tol: float
+) -> tuple[float, float] | None:
+    """The valid anchor closest to (x0, y0): spiral outwards over the whole hex."""
+    for ring in range(0, 16):
+        rad = ring * 0.07
+        steps = 1 if ring == 0 else 8 + ring * 2
+        for k in range(steps):
+            ang = k / steps * math.tau
+            x, y = x0 + math.cos(ang) * rad, y0 + math.sin(ang) * rad
+            if _fits(x, y, w, h) and all(_overlap(p, x, y, w, h) <= tol for p in placed):
+                return x, y
+    return None
+
+
 def layout_props(reqs: list[PropRequest], tile_px: int) -> tuple[list[PropSlot], list[str]]:
     """-> (placed slots, kinds that could not be fitted)."""
     r_px = tile_px / 2.0
@@ -82,26 +97,14 @@ def layout_props(reqs: list[PropRequest], tile_px: int) -> tuple[list[PropSlot],
     for q in order:
         cap = {"landmark": MAX_W_LANDMARK, "prop": MAX_W_PROP, "scatter": MAX_W_SCATTER}[q.role]
         scale = min(q.scale, cap * r_px / max(1, q.art_w))
+        tol = 0.35 if q.role == "scatter" else 0.18
         slot = None
-        for _ in range(4):  # shrink a little if nothing fits
+        for _ in range(6):  # shrink a little if nothing fits
             w, h = q.art_w * scale / r_px, q.art_h * scale / r_px
-            tol = 0.35 if q.role == "scatter" else 0.18
-            best = None
-            for ring in range(0, 7):
-                rad = ring * 0.08
-                steps = 1 if ring == 0 else 10
-                for k in range(steps):
-                    ang = k / steps * math.tau
-                    x, y = q.x + math.cos(ang) * rad, q.y + math.sin(ang) * rad
-                    if not _fits(x, y, w, h):
-                        continue
-                    if any(_overlap(p, x, y, w, h) > tol for p in placed):
-                        continue
-                    best = (x, y)
-                    break
-                if best:
-                    break
-            if best:
+            best = _nearest_free(q.x, q.y, w, h, placed, tol)
+            if best is None and q.role == "landmark":
+                best = _nearest_free(0.0, 0.3, w, h, placed, 1.0)  # a landmark is never dropped
+            if best is not None:
                 slot = PropSlot(q.kind, best[0], best[1], scale, w, h, q.role)
                 break
             scale *= 0.85
