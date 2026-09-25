@@ -45,7 +45,7 @@ async def test_full_run_fills_plan_with_valid_seams(make_runtime):
     assert w.spec and w.style and w.anchor_asset_ids
 
 
-async def test_neighbours_are_never_in_flight_together_and_growth_starts_at_origin(make_runtime):
+async def test_neighbour_attempts_never_overlap_and_growth_starts_at_origin(make_runtime):
     rt = make_runtime(llm=FakeClient(latency_s=0.01, reject_rate=0.3))
     world, run = await _run(rt, radius=3)
     assert run.status == RunStatus.completed, run.error
@@ -53,9 +53,11 @@ async def test_neighbours_are_never_in_flight_together_and_growth_starts_at_orig
     spans: dict[Hex, list[tuple[float, float]]] = defaultdict(list)
     started = {}
     for e in events:
-        if e.type == "tile.job.started":
+        # attempts (design -> checks) of neighbours never overlap; the review may run off the
+        # critical path once a tile is provisionally settled
+        if e.type == "tile.attempt.started":
             started[e.span_id] = (Hex(e.q, e.r), e.ts)
-        elif e.type == "tile.job.finished" and e.span_id in started:
+        elif e.type == "tile.attempt.finished" and e.span_id in started:
             h, t0 = started.pop(e.span_id)
             spans[h].append((t0, e.ts))
     for h, ivs in spans.items():

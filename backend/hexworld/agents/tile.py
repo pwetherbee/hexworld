@@ -40,7 +40,9 @@ def design_model(world: World) -> type[BaseModel]:
         negative_prompt=(str, ""),
         props=(
             list[PropSpec],
-            Field(default_factory=list, description="0 or 1 landmark (the directive's feature)"),
+            Field(
+                default_factory=list, description="0-4 sprites for the directive's features (max 1 landmark)"
+            ),
         ),
     )
 
@@ -115,7 +117,7 @@ def normalize_design(
                 "scale": min(1.6, max(0.6, p.scale)),
             }
         )
-        for p in design.props[:3]
+        for p in design.props[:4]
         if p.kind.strip()
     ]
     relief = min(3, max(0, design.relief))
@@ -160,18 +162,23 @@ class TileAgent:
             """Sprites and materials already designed for this world (reuse sprite kinds by exact name)."""
             return api.library()
 
-        async def request_prop(kind: str, brief: str) -> dict:
-            """Commission a landmark sprite from the sprite artist (or reuse it if the library has it).
-            Returns the sprite's preview so you can decide whether to use it."""
-            entry, png = await api.commission_sprite(kind, brief, c.q, c.r)
-            if entry is None:
-                return {
-                    "error": "the sprite artist could not produce it; continue without, or try another kind"
+        def request_prop(kind: str, brief: str) -> dict:
+            """Use a sprite on your tile. If the library has this kind, you get its preview. Otherwise
+            the sprite artist starts painting it from your brief (what it is, materials, colours,
+            silhouette) and it is placed on your tile when ready: don't wait, submit your design
+            with it listed in props."""
+            entry, png = api.sprite_entry(kind)
+            if entry is not None:
+                out: dict[str, Any] = {
+                    "kind": entry.kind,
+                    "size_px": [entry.px_w, entry.px_h],
+                    "status": "in library",
                 }
-            out: dict[str, Any] = {"kind": entry.kind, "size_px": [entry.px_w, entry.px_h]}
-            if png:
-                out["preview"] = image_part(png)
-            return out
+                if png:
+                    out["preview"] = image_part(png)
+                return out
+            api.commission_sprite_later(kind, brief)
+            return {"kind": kind, "status": "commissioned: being painted now; list it in props"}
 
         def submit_design(design: Any, tool_context: ToolContext) -> dict:
             """Submit your tile design."""

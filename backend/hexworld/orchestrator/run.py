@@ -40,6 +40,7 @@ from hexworld.agents.tile import TileAgent
 from hexworld.art.backend import ImageRequest
 from hexworld.art.composite import context_canvas, crop_target, neighborhood_png, render_region, to_png
 from hexworld.art.grid import TileCanvas
+from hexworld.art.layout import PropRequest, layout_props
 from hexworld.art.pixelize import PixelTile, crisp_tile, load_tile, pixelize_to_canvas
 from hexworld.art.procedural import fallback_material, ramp_hexes, render_ground
 from hexworld.art.sprites import Placed, SpriteArt, flatten, preview_png, scatter_positions
@@ -74,6 +75,10 @@ FREE_STATUSES = {TileStatus.empty, TileStatus.intentionally_empty, TileStatus.fa
 ACTIVE_STATUSES = {TileStatus.planned, TileStatus.generating, TileStatus.reviewing}
 
 
+MAX_PROPS = 4  # agent-chosen props per tile (at most one of them a landmark)
+MAX_SPRITES = 6  # props + ambient scatter
+
+
 @dataclass
 class Job:
     tile: Tile
@@ -81,6 +86,8 @@ class Job:
     attempts_this_run: int = 0
     agent: TileAgent | None = None  # persistent tile-agent session across attempts
     feedback: str | None = None  # pending reviewer/validator feedback for the agent
+    # edges neighbours were already built against while this tile was provisionally settled
+    locked: dict[int, EdgeSpec] = field(default_factory=dict)
 
 
 @dataclass
@@ -135,6 +142,14 @@ class RunExecutor:
         self._director_notes: list[str] = []
         self._redo: list[Tile] = []
         self._root: Span | None = None
+        # Scheduling: a tile is BUSY while its design can still change (neighbours may not start
+        # next to it). Once its candidate passes the deterministic checks it is PROVISIONALLY
+        # settled: its edges are frozen, neighbours may build against it, and the (slower) review
+        # runs off the critical path. A rejected tile keeps the edges neighbours used.
+        self._busy: set[Hex] = set()
+        self._provisional: dict[Hex, Candidate] = {}
+        self._waiting: set[Hex] = set()  # rejected tiles waiting for busy neighbours before redesigning
+        self._bg: set[asyncio.Task] = set()  # fire-and-forget library work (kept referenced)
         self.origin = run.origin.hex
 
     # ================================================================== lifecycle
@@ -756,6 +771,14 @@ class RunExecutor:
             "materials": sorted(self.world.materials),
         }
 
+    def sprite_entry(self, kind: str) -> tuple[SpriteEntry | None, bytes | None]:
+        e = self.world.sprites.get(kind_key(kind))
+        return (e, preview_png(self._sprite_art(e), scale=6)) if e is not None else (None, None)
+
+    def commission_sprite_later(self, kind: str, brief: str) -> None:
+        """Start painting in the background; the tile's layer step joins it (single-flight)."""
+        self._background(self._ensure_sprite(kind, brief, self._root))
+
     async def commission_sprite(self, kind: str, brief: str, q: int | None, r: int | None):
         entry = await self._ensure_sprite(kind, brief, self._root)
         if entry is None:
@@ -875,48 +898,53 @@ class RunExecutor:
         variant: int,
         parent: Span,
     ) -> tuple[list[TileLayer], np.ndarray]:
-        """Ground + prop sprites (designed on demand) + ambient scatter from the biome's material."""
+        """Ground + prop sprites (designed on demand) + ambient scatter from the biome's material,
+        laid out by the engine so nothing overlaps or spills out of the hex."""
         style = self.world.style
         assert style is not None
         P = style.tile_px
-        # A landmark (at most one) stands in the middle; ambient scatter only when there is none.
-        wanted: list[tuple[str, float, float, float, str]] = [
-            (
-                p.kind,
-                max(-0.12, min(0.12, p.x)),
-                max(-0.02, min(0.2, p.y)),
-                p.scale,
-                f"{design.biome}: {design.summary}",
-            )
-            for p in design.props[:1]
+        ctx = f"{design.biome}: {design.summary}"
+        wanted: list[tuple[str, float, float, float, str, str]] = [
+            (p.kind, p.x, p.y, p.scale, ctx, "prop") for p in design.props[:MAX_PROPS]
         ]
         mat = self.world.materials.get(design.biome)
-        if mat is not None and not wanted:
+        if mat is not None and len(wanted) < MAX_SPRITES:
             for kind, x, y, sc in scatter_positions(mat.scatter, (t.q, t.r), variant):
-                wanted.append((kind, x, y, sc, f"ambient on {design.biome}"))
-        entries = await asyncio.gather(*[self._ensure_sprite(k, ctx, parent) for k, _, _, _, ctx in wanted])
+                if len(wanted) >= MAX_SPRITES:
+                    break
+                wanted.append((kind, x, y, sc, f"ambient on {design.biome}", "scatter"))
+        entries = await asyncio.gather(*[self._ensure_sprite(w[0], w[4], parent) for w in wanted])
+        reqs: list[PropRequest] = []
+        arts: dict[str, tuple[SpriteEntry, SpriteArt]] = {}
+        landmark_taken = False
+        for (_kind, x, y, sc, _ctx, role), e in zip(wanted, entries, strict=True):
+            if e is None:
+                continue
+            art = self._sprite_art(e)
+            arts[e.kind] = (e, art)
+            if role == "prop" and art.h >= 30 and not landmark_taken:
+                role, landmark_taken = "landmark", True
+            reqs.append(PropRequest(e.kind, x, y, sc, art.w, art.h, role))
+        slots, dropped = layout_props(reqs, P)
+        if dropped:
+            parent.set(dropped=dropped)
         canvas = TileCanvas(t.hex, P)
         layers = [
             TileLayer(kind="ground", asset_id=ground_id, px_w=canvas.C, px_h=canvas.C),
             TileLayer(kind="height", asset_id=height_id, px_w=canvas.C, px_h=canvas.C),
         ]
         placed: list[Placed] = []
-        for (_kind, x, y, sc, _), e in zip(wanted, entries, strict=True):
-            if e is None:
-                continue
-            art = self._sprite_art(e)
-            is_landmark = _kind == wanted[0][0] and len(design.props) > 0
-            max_w = 1.0 if is_landmark else 0.5  # in hex radii: landmarks <= 1 radius, scatter half that
-            sc = min(sc, max_w * (P / 2.0) / max(1, art.w))
-            placed.append(Placed(kind=e.kind, art=art, x=x, y=y, scale=sc))
+        for sl in sorted(slots, key=lambda sl: sl.y):
+            e, art = arts[sl.kind]
+            placed.append(Placed(kind=e.kind, art=art, x=sl.x, y=sl.y, scale=sl.scale))
             layers.append(
                 TileLayer(
                     kind="sprite",
                     asset_id=e.asset_id,
                     label=e.kind,
-                    x=x,
-                    y=y,
-                    width=art.w / (P / 2.0) * sc,
+                    x=sl.x,
+                    y=sl.y,
+                    width=sl.w,
                     px_w=art.w,
                     px_h=art.h,
                     frames=e.frames,
@@ -982,12 +1010,17 @@ class RunExecutor:
 
     # ================================================================== streaming growth
 
+    def _settled(self, h: Hex) -> bool:
+        nt = self.tiles.get(h)
+        return h in self._provisional or (nt is not None and nt.status == TileStatus.accepted)
+
+    def _background(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self._bg.add(task)
+        task.add_done_callback(self._bg.discard)
+
     def _score(self, t: Tile) -> float:
-        accepted_nb = sum(
-            1
-            for n in t.hex.neighbors()
-            if (nt := self.tiles.get(n)) is not None and nt.status == TileStatus.accepted
-        )
+        accepted_nb = sum(1 for n in t.hex.neighbors() if self._settled(n))
         prio = 3
         if self.run.plan:
             prio = next((pt.priority for pt in self.run.plan.tiles if (pt.q, pt.r) == (t.q, t.r)), 3)
@@ -999,15 +1032,14 @@ class RunExecutor:
         )
 
     def _ready(self, pending: dict[Hex, Tile], busy: set[Hex]) -> list[Tile]:
-        world_started = any(t.status == TileStatus.accepted for t in self.tiles.values())
+        world_started = bool(self._provisional) or any(
+            t.status == TileStatus.accepted for t in self.tiles.values()
+        )
         out = []
         for t in pending.values():
-            if any(n in busy for n in t.hex.neighbors()):
+            if any(n in busy or n in self._waiting for n in t.hex.neighbors()):
                 continue
-            touching = any(
-                (nt := self.tiles.get(n)) is not None and nt.status == TileStatus.accepted
-                for n in t.hex.neighbors()
-            )
+            touching = any(self._settled(n) for n in t.hex.neighbors())
             if not (touching or (not world_started and t.hex == self.origin)):
                 continue
             spec = t.directive.duplicate if t.directive else None
@@ -1040,7 +1072,7 @@ class RunExecutor:
         try:
             while pending or inflight:
                 self._raise_budget()
-                busy = set(inflight)
+                busy = set(self._busy)
                 for t in self._ready(pending, busy):
                     if len(inflight) >= cap:
                         break
@@ -1048,6 +1080,7 @@ class RunExecutor:
                         continue
                     pending.pop(t.hex)
                     busy.add(t.hex)
+                    self._busy.add(t.hex)
                     inflight[t.hex] = asyncio.create_task(self._job(t, root))
                 if not inflight:
                     if not pending:
@@ -1055,6 +1088,7 @@ class RunExecutor:
                     # Nothing touches the settled world (e.g. a separate island): seed the best one.
                     t = max(pending.values(), key=self._score)
                     pending.pop(t.hex)
+                    self._busy.add(t.hex)
                     inflight[t.hex] = asyncio.create_task(self._job(t, root))
                     continue
                 await self._wake.wait()
@@ -1098,6 +1132,9 @@ class RunExecutor:
                     if await self._resolve_copy(job, jsp, final=True) == "copied":
                         jsp.set(outcome="copied")
                         return "accepted"
+                if job.directive.biome not in self.world.materials:
+                    # the material this tile will almost surely paint: design it while the agent designs
+                    self._background(self._ensure_material(job.directive.biome, False, jsp))
                 while True:
                     cand = await self._produce(job, jsp)
                     if self._budget_error is not None:
@@ -1106,7 +1143,11 @@ class RunExecutor:
                         fut: asyncio.Future = asyncio.get_running_loop().create_future()
                         self._review_q.append((cand, fut))
                         self._review_ready.set()
+                        self._provisional[t.hex] = cand
+                        self._busy.discard(t.hex)
+                        self._wake.set()  # neighbours may start now
                         v = await fut
+                        self._provisional.pop(t.hex, None)
                         last_chance = (
                             job.directive.simplified
                             and job.attempts_this_run >= self.run.options.max_attempts
@@ -1126,20 +1167,45 @@ class RunExecutor:
                             await self._refresh_if_stale(cand)
                             jsp.set(outcome="accepted", attempts=job.attempts_this_run)
                             return "accepted"
+                        for i, n in enumerate(t.hex.neighbors()):
+                            if n in self._busy or self._settled(n):
+                                job.locked[i] = cand.design.edges[i]
                         cand.attempt.verdict = v
                         cand.attempt.outcome = "rejected"
                         self.store.put_attempt(cand.attempt)
                         self.run.stats.rejections_review += 1
                         job.feedback = v.feedback or "rejected by the reviewer; improve it"
                         job.directive.feedback.append(job.feedback)
+                        if job.locked:
+                            dirs = ", ".join(DIRECTION_NAMES[i] for i in sorted(job.locked))
+                            job.feedback += (
+                                f" (Keep your {dirs} edge(s) exactly as they were: neighbouring tiles "
+                                "have already been built against them.)"
+                            )
                     elif cand is not None:
                         job.feedback = f"automatic checks failed: {cand.checks.feedback}"
                         job.directive.feedback.append(cand.checks.feedback)
                     if not self._retry_or_fail(job, self.run.options.max_attempts):
                         jsp.set(outcome="failed", attempts=job.attempts_this_run)
                         return "failed"
+                    await self._claim(t.hex)
         finally:
+            self._busy.discard(t.hex)
+            self._provisional.pop(t.hex, None)
             self._wake.set()
+
+    async def _claim(self, h: Hex) -> None:
+        """Before a retry: wait until no neighbour is mid-attempt, then mark this tile busy again, so
+        neighbouring designs never overlap (a rejected tile redesigns against settled edges only)."""
+        self._busy.discard(h)
+        self._waiting.add(h)
+        self._wake.set()
+        try:
+            while any(n in self._busy for n in h.neighbors()):
+                await asyncio.sleep(0.05)
+        finally:
+            self._waiting.discard(h)
+        self._busy.add(h)
 
     async def _review_loop(self, parent: Span) -> None:
         """Continuous reviewer: waits a moment so near-simultaneous candidates share one call, then
@@ -1311,6 +1377,7 @@ class RunExecutor:
                 assert style is not None and world.spec is not None
                 P = style.tile_px
                 neighbors, accepted_arrays, facing = self._neighbor_context(h)
+                facing = {**job.locked, **facing}
                 arrays_by_hex = {h.neighbor(i): a for i, a in accepted_arrays.items()}
                 anchor = self._anchor_png()
 
@@ -1553,9 +1620,14 @@ class RunExecutor:
                     + ("accepted" if v.accept else f"rejected ({v.feedback[:90]})")
                 )
                 if v.sprite_feedback:
-                    landmark = next((layer.label for layer in c.layers if layer.kind == "sprite"), None)
-                    if landmark:
-                        await self._revise_sprite(landmark, v.sprite_feedback, sp)
+                    kinds = [layer.label for layer in c.layers if layer.kind == "sprite" and layer.label]
+                    name, _, note = v.sprite_feedback.partition(":")
+                    key = kind_key(name) if note else ""
+                    target = key if key in kinds else (kinds[0] if kinds else None)
+                    if target:
+                        await self._revise_sprite(
+                            target, (note if key == target else v.sprite_feedback).strip(), sp
+                        )
                 if v.material_feedback:
                     name, _, note = v.material_feedback.partition(":")
                     name = name.strip() if note and name.strip() in self.world.materials else c.design.biome
@@ -1634,7 +1706,19 @@ class RunExecutor:
             }
             if n.distance(ORIGIN) > self.world.radius:
                 entry["status"] = "out_of_world"
-            if nt and nt.status == TileStatus.accepted and nt.edges and nt.asset_id:
+            prov = self._provisional.get(n)
+            if prov is not None:  # provisionally settled: build against its (frozen) edges
+                fe = prov.design.edges[opposite(i)]
+                entry.update(
+                    status="accepted",
+                    biome=prov.design.biome,
+                    summary=prov.design.summary,
+                    art_prompt=prov.design.art_prompt,
+                    facing_edge=fe.model_dump(),
+                )
+                facing[i] = fe
+                arrays[i] = prov.pix.rgba
+            elif nt and nt.status == TileStatus.accepted and nt.edges and nt.asset_id:
                 fe = nt.edges[opposite(i)]
                 entry.update(
                     biome=nt.biome, summary=nt.summary, art_prompt=nt.art_prompt, facing_edge=fe.model_dump()

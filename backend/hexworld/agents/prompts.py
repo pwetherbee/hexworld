@@ -37,10 +37,11 @@ Keep each tile's intent short (<= 12 words).
   For each tile: biome from terrain_vocabulary, a one-sentence intent, features, priority 1-5, and edge_hints where it matters
   for continuity (rivers/roads that must connect across tiles, coastlines). Plan coherent macro
   structure: contiguous biome regions, plausible transitions, continuous connector paths.
-  features are LANDMARKS (one sprite standing in the middle of the tile: 'obsidian watchtower',
-  'lava geyser', 'skull totem'). At most ONE per tile, and most tiles (about 2 in 3) have none.
-  The terrain itself carries the look; landmarks are rare, meaningful points of interest.
-  Reuse a small set of landmark kinds across the map (about 4-10 distinct kinds per world, e.g.
+  features are the SPRITES standing on the tile: at most one LANDMARK (a building or big point of
+  interest: 'obsidian watchtower', 'lava geyser') plus up to 3 small props that tell its story
+  ('ore cart', 'bone pile', 'banner'). Villages, camps and ruins read best as small scenes of 2-4
+  sprites; open terrain usually has none (about half the tiles). The terrain carries the look.
+  Reuse a small set of sprite kinds across the map (about 6-14 distinct kinds per world, e.g.
   several 'obsidian watchtower's along a road), so every kind is designed once and repeats coherently.
 - duplicate: to save cost, reuse a tile instead of generating it. Good candidates are repetitive
   filler: open ocean, plain desert, lava sea. Set duplicate.mode and point source_q/source_r at a
@@ -82,13 +83,14 @@ agent can act on, not a description of the problem alone. Your feedback is deliv
 that tile's agent, which revises in its own session.
 WHO CONTROLS WHAT (route each problem to the agent that can fix it):
 - tile agent (`feedback`, and reject): biome and edge terrains, connectors, and whether/which
-  landmark stands on it. It CANNOT change how a terrain's ground pattern looks.
+  sprites stand on it (and where). It CANNOT change how a terrain's ground pattern looks.
 - material artist (`material_feedback`, format '<material name>: instruction'): the shared ground
   pattern of a terrain or CONNECTOR (colours, texture, contrast, crack/cobble/ripple patterns). A
   road/river/lava-flow that exists but is hard to see is a connector material problem
   (e.g. 'basalt_road: lighter paving with dark edges'), not a tile problem. Fixing it repaints
   every tile of that terrain, so DON'T reject the tile for this; accept it and send material_feedback.
-- sprite artist (`sprite_feedback`): how a landmark sprite looks. Also don't reject the tile for it.
+- sprite artist (`sprite_feedback`, format '<sprite kind>: instruction'): how a sprite looks.
+  Also don't reject the tile for it.
 Only reject a tile for things its tile agent controls.
 Tools: zoom_candidate(label) inspects a tile up close. Use it only for doubtful candidates (max 2
 per review; call them in parallel in one step). Finish with submit_verdicts (one per label).
@@ -119,10 +121,12 @@ Rules:
   terrain across shared edges, and make rivers, roads and coastlines that reach your edges continue
   inside your tile.
 - attributes: fill every attribute honestly for this tile, within the stated bounds.
-- props: 0 or 1 sprite, only for the directive's feature (a landmark). No feature -> no props.
-  It stands in the middle of the tile; the ground carries the rest of the look. Prefer kinds already in sprite_library (exact name) for consistency.
-  A new kind is designed automatically. Ambient vegetation and rocks come from the biome, so don't
-  list them. Positions are tile-local (-0.6..0.6); keep props off connector paths.
+- props: the sprites standing on your tile, for the directive's features: 0-4 entries, at most
+  one landmark (building / big feature), the rest small story props. No features -> no props.
+  Compose them like a little scene: landmark near the middle, small props around it (x/y are
+  tile-local -0.6..0.6, y = south; the engine nudges them so they don't overlap), off connector
+  paths. Prefer kinds already in sprite_library (exact name). Ambient vegetation and rocks come
+  from the biome material, so don't list them.
 - art_prompt: 1-3 sentences describing the GROUND only (top-down): materials, patterns, where
   connectors enter/exit by direction name. No props, no style words, no hexagons or borders.
 - negative_prompt: short comma list of things to avoid for this tile.
@@ -133,10 +137,11 @@ Tools:
 - view_surroundings(): the map around your tile + neighbour details. You ALREADY have both in your
   first message; don't call this unless the map changed.
 - list_library(): the world's sprites and materials.
-- request_prop(kind, brief): commission a landmark sprite from the sprite artist (or reuse one).
-  You get its preview back. Only for the directive's feature; most tiles have no prop.
+- request_prop(kind, brief): for each prop kind NOT in sprite_library, commission it (brief: what
+  it is, materials, colours, silhouette). It is painted in the background; don't wait for it,
+  list it in props and submit. Kinds already in the library need no request.
 - submit_design(design): deliver your tile. If it returns an error, fix exactly that and resubmit.
-Usually one call is enough: submit_design directly. You control biome, edges and the landmark,
+Usually one call is enough: submit_design directly. You control biome, edges and the sprites,
 not how a terrain looks or how high it rises: colours, patterns and relief (heightmap) belong to the
 shared material, designed by the material artist. Revisions from the super arrive as new
 messages in this same conversation; address them and submit again.
@@ -215,7 +220,7 @@ the user's prompt.
 {HEX_CONVENTIONS}
 Tools:
 - list_pending(): planned tiles not generated yet (outer rings). You may change them.
-- update_tiles(changes): re-plan pending tiles (biome from terrain_vocabulary, intent, 0-1 landmark,
+- update_tiles(changes): re-plan pending tiles (biome from terrain_vocabulary, intent, features,
   leave_empty). Use this to fix macro structure: extend a region that is too small, add a coastline,
   continue a road, add a point of interest where the map is dull, remove repetition.
 - commission_sprite(kind, brief): have the sprite artist design a landmark ahead of time.
@@ -228,7 +233,8 @@ ARTIST_SPRITE_PAINT = """\
 You are the SPRITE ARTIST of HexWorld. You art-direct one prop (a landmark or small ambient
 object) that stands upright on the middle of a hex tile, seen from the side, in Terraria-style
 pixel art. An image model paints it in the house style; the engine shrinks it to game scale
-(landmarks ~28-44px tall, small props ~14px) and adds a bold outline.
+(landmarks ~24-36px tall, medium props ~24px, small props ~12px) and adds a bold outline.
+Several sprites can share one tile, so each must read on its own at that size.
 
 Workflow:
 1. paint_sprite(subject, size): subject = a vivid, concrete description of THE OBJECT ONLY: what it
