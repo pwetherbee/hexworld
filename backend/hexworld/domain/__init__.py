@@ -259,6 +259,15 @@ class WorldPlan(BaseModel):
     tiles: list[PlannedTile]
 
 
+class WorldHeader(BaseModel):
+    """First half of a plan: enough to start building the origin while the rest is planned."""
+
+    world: WorldSpec
+    style: StyleGuide
+    tile_attributes: list[AttributeDef]
+    origin_tile: PlannedTile = Field(description="The origin tile's plan (it starts building right away).")
+
+
 class Directive(BaseModel):
     """What the super asks of one tile agent (derived from a PlannedTile, plus retry feedback)."""
 

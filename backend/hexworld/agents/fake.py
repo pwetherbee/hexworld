@@ -58,6 +58,13 @@ class FakeClient:
             )
         rng = _rng(task, payload, len(followups))
         data = getattr(self, f"_{task}")(payload, rng)
+        if task == "world_plan" and "submit_world" in tools:  # two-step plan: header, then tiles
+            o = payload["origin"]
+            origin_tile = next(t for t in data["tiles"] if (t["q"], t["r"]) == (o["q"], o["r"]))
+            if "submit_world" not in called:
+                header = {k: data[k] for k in ("world", "style", "tile_attributes")}
+                return "submit_world", {"header": {**header, "origin_tile": origin_tile}}
+            return "submit_tiles", {"tiles": data["tiles"]}
         render = self.RENDER.get(task)
         arg_name = self.SUBMIT[task][1]
         if render and render in tools and render not in called:  # look at the draft once

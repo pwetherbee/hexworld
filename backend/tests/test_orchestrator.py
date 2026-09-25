@@ -274,3 +274,17 @@ async def test_material_feedback_goes_to_the_material_artist_and_repaints(make_r
     assert rev and rev[0].data["ok"] and rev[0].data["tiles_repainted"] >= 1
     # the reviewer's material note did not reject the tile
     assert run.stats.rejections_review == 0
+
+
+async def test_origin_starts_building_while_the_rest_is_planned(make_runtime):
+    rt = make_runtime(llm=FakeClient(latency_s=0.02, reject_rate=0))
+    world, run = await _run(rt, radius=2)
+    assert run.status == RunStatus.completed, run.error
+    events = rt.store.list_events(run_id=run.id)
+    header = next(e for e in events if e.type == "plan.header")
+    plan_done = next(e for e in events if e.type == "super.plan.finished")
+    origin_job = next(e for e in events if e.type == "tile.job.started" and (e.q, e.r) == (0, 0))
+    assert header.id < origin_job.id < plan_done.id
+    tiles = {t.hex: t for t in rt.store.list_tiles(world.id)}
+    assert tiles[Hex(0, 0)].status == TileStatus.accepted
+    assert run.stats.tiles_accepted == run.stats.tiles_planned

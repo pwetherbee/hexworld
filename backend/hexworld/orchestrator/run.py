@@ -161,6 +161,7 @@ class RunExecutor:
         self._freed = asyncio.Event()  # set whenever a tile stops being busy
         self._waiting: set[Hex] = set()  # rejected tiles waiting for busy neighbours before redesigning
         self._bg: set[asyncio.Task] = set()  # fire-and-forget library work (kept referenced)
+        self._early: dict[Hex, asyncio.Task] = {}  # the origin, started from the plan header
         self.origin = run.origin.hex
 
     # ================================================================== lifecycle
@@ -180,12 +181,16 @@ class RunExecutor:
                 llm=self.rt.llm_name,
                 image_backend=self.rt.image.name,
             ) as root:
-                if run.plan is None:
-                    await self._plan(root)
-                else:
-                    self._reset_inflight()
                 self._root = root
-                await self._grow(root)
+                self._init_growth(root)
+                try:
+                    if run.plan is None:
+                        await self._plan(root)
+                    else:
+                        self._reset_inflight()
+                    await self._grow(root)
+                finally:
+                    await self._stop_growth()
             self._finish(RunStatus.completed)
         except BudgetExceeded as e:
             self._finish(RunStatus.completed, error=f"budget: {e}")
@@ -231,7 +236,8 @@ class RunExecutor:
         candidates = [
             h
             for h in spiral(self.origin, self.run.options.radius)
-            if h.distance(ORIGIN) <= w.radius and self._tile(h).status in FREE_STATUSES
+            if h.distance(ORIGIN) <= w.radius
+            and (self._tile(h).status in FREE_STATUSES or self._tile(h).run_id == self.run.id)
         ]
         cand_set = set(candidates)
         nearby = []
@@ -269,6 +275,7 @@ class RunExecutor:
                 nearby=nearby,
                 nearby_png=nearby_png,
                 parent=sp,
+                on_header=self._on_header,
             )
             plan = self._apply_plan(plan)
             sp.set(
@@ -286,6 +293,24 @@ class RunExecutor:
             },
         )
         self._emit_stats()
+
+    def _on_header(self, header: WorldPlan) -> None:
+        """The planner submitted the world + origin tile: start building the origin right away,
+        while it plans the rest (the origin never depends on other tiles)."""
+        self._apply_plan(header)
+        # the header is not the plan: if we crash before the full plan arrives, resume re-plans
+        self.run.plan = None
+        self.store.put_run(self.run)
+        w = self.world
+        self.tracer.emit(
+            "plan.header",
+            data={"world": w.spec.model_dump() if w.spec else None, "origin": self.origin.key},
+        )
+        t = self.tiles.get(self.origin)
+        if t is None or t.status != TileStatus.planned or t.directive is None:
+            return
+        self._busy.add(self.origin)
+        self._early[self.origin] = asyncio.create_task(self._job(t, self._root))
 
     def _apply_plan(self, plan: WorldPlan) -> WorldPlan:
         w = self.world
@@ -324,6 +349,8 @@ class RunExecutor:
             ]
             pt = pt.model_copy(update={"biome": biome, "edge_hints": hints, "duplicate": dups[pt.hex]})
             fixed.append(pt)
+            if pt.hex in self._early:
+                continue  # already building (started from the plan header)
             tile = self._tile(pt.hex)
             tile.run_id = self.run.id
             tile.attempts = 0
@@ -1084,18 +1111,31 @@ class RunExecutor:
             out.append(t)
         return sorted(out, key=self._score, reverse=True)
 
+    def _init_growth(self, root: Span) -> None:
+        self._wake = asyncio.Event()
+        self._review_ready = asyncio.Event()
+        self._review_q: list[tuple[Candidate, asyncio.Future]] = []
+        self._review_sem = asyncio.Semaphore(2)
+        self._reviewer = asyncio.create_task(self._review_loop(root))
+
+    async def _stop_growth(self) -> None:
+        tasks = [self._reviewer, *[t for t in self._early.values() if not t.done()]]
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
     async def _grow(self, root: Span) -> None:
         pending: dict[Hex, Tile] = {
             t.hex: t
             for t in self.tiles.values()
             if t.run_id == self.run.id and t.status == TileStatus.planned and t.directive is not None
         }
-        inflight: dict[Hex, asyncio.Task] = {}
-        self._wake = asyncio.Event()
-        self._review_ready = asyncio.Event()
-        self._review_q = []
-        self._review_sem = asyncio.Semaphore(2)
-        reviewer = asyncio.create_task(self._review_loop(root))
+        pending = {h: t for h, t in pending.items() if h not in self._early}
+        inflight: dict[Hex, asyncio.Task] = dict(self._early)
         cap = max(1, self.s.tile_concurrency)
         direct_every = max(6, len(pending) // 4)
         since_direct = 0
@@ -1149,8 +1189,7 @@ class RunExecutor:
         finally:
             for task in inflight.values():
                 task.cancel()
-            reviewer.cancel()
-            for task in [*inflight.values(), reviewer]:
+            for task in inflight.values():
                 try:
                     await task
                 except (asyncio.CancelledError, Exception):  # noqa: BLE001

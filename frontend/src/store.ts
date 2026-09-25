@@ -251,7 +251,7 @@ export const useStore = create<State>((set, get) => ({
       patch.libraryBusy = s.libraryBusy + 1;
     } else if (live && (ev.type === "library.material.finished" || ev.type === "library.sprite.finished")) {
       patch.libraryBusy = Math.max(0, s.libraryBusy - 1);
-    } else if (ev.type === "plan.created" && live) {
+    } else if ((ev.type === "plan.created" || ev.type === "plan.header") && live) {
       void get().refreshWorld();
     }
     set(patch);

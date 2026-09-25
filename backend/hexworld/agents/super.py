@@ -1,11 +1,13 @@
 """The super agent (board creator), on Google ADK.
 
-- planner: produces the WorldPlan through `submit_plan`; validation errors go back to it.
+- planner: `submit_world` (header + origin tile, which starts building at once), then
+  `submit_tiles`; validation errors go back to it.
 - reviewer: reviews each wave with vision, can zoom into candidates, and can address feedback to
   the tile agent (tile feedback) and to the sprite artist (sprite_feedback).
 The director (mid-run management) lives in agents/director.py.
 """
 
+from collections.abc import Callable
 from typing import Any
 
 from google.adk.tools import ToolContext
@@ -13,7 +15,7 @@ from pydantic import ValidationError
 
 from hexworld.agents import prompts
 from hexworld.agents.kit import AgentKit, coerce, image_part, submitted, text_part
-from hexworld.domain import Verdict, WaveReview, World, WorldPlan
+from hexworld.domain import PlannedTile, Verdict, WaveReview, World, WorldHeader, WorldPlan
 from hexworld.hex import Hex
 from hexworld.telemetry import Span
 
@@ -42,32 +44,68 @@ async def plan_world(
     nearby: list[dict[str, Any]],
     nearby_png: bytes | None,
     parent: Span | None,
+    on_header: Callable[[WorldPlan], None] | None = None,
 ) -> WorldPlan:
+    """Two submissions: `submit_world` (world, style, attributes, origin tile) lets the build start
+    at the origin while the planner writes the rest; `submit_tiles` completes the plan."""
     allowed = {h.key for h in candidates}
     holder: dict[str, Any] = {}
+    state: dict[str, Any] = {}
 
-    def submit_plan(plan: WorldPlan, tool_context: ToolContext) -> dict:
-        """Submit the complete WorldPlan. Returns an error describing what to fix if it is invalid."""
+    def submit_world(header: WorldHeader) -> dict:
+        """Submit the world spec, style, tile attributes and the ORIGIN tile's plan. The origin
+        starts building immediately; then submit every other tile with submit_tiles."""
         try:
-            plan = coerce(WorldPlan, plan)
+            header = coerce(WorldHeader, header)
         except (ValidationError, ValueError) as e:
             return {"error": str(e)[:900]}
-        keys = [f"{t.q},{t.r}" for t in plan.tiles]
+        o = header.origin_tile
+        if (o.q, o.r) != (origin.q, origin.r) or o.leave_empty:
+            return {"error": f"origin_tile must be the origin {origin.key} and not left empty"}
+        if "header" in state:
+            return {"error": "the world is already submitted; now call submit_tiles"}
+        state["header"] = header
+        if on_header is not None:
+            on_header(
+                WorldPlan(
+                    world=header.world,
+                    style=header.style,
+                    tile_attributes=header.tile_attributes,
+                    tiles=[header.origin_tile],
+                )
+            )
+        return {"ok": "the origin is being built; now call submit_tiles with every other tile"}
+
+    def submit_tiles(tiles: list[PlannedTile], tool_context: ToolContext) -> dict:
+        """Submit the plan for every other tile (the origin may be omitted). Returns an error
+        describing what to fix if it is invalid."""
+        header: WorldHeader | None = state.get("header")
+        if header is None:
+            return {"error": "call submit_world first"}
+        try:
+            tiles = [coerce(PlannedTile, t) for t in tiles]
+        except (ValidationError, ValueError) as e:
+            return {"error": str(e)[:900]}
+        tiles = [t for t in tiles if (t.q, t.r) != (origin.q, origin.r)]
+        keys = [f"{t.q},{t.r}" for t in tiles]
         bad = [k for k in keys if k not in allowed]
         if bad:
             return {"error": f"tiles outside candidate_coords: {bad[:8]}"}
         if len(set(keys)) != len(keys):
             return {"error": "duplicate tile coordinates"}
-        o = next((t for t in plan.tiles if (t.q, t.r) == (origin.q, origin.r)), None)
-        if o is None or o.leave_empty:
-            return {"error": f"origin {origin.key} must be planned and not left empty"}
+        plan = WorldPlan(
+            world=header.world,
+            style=header.style,
+            tile_attributes=header.tile_attributes,
+            tiles=[header.origin_tile, *tiles],
+        )
         return submitted(tool_context, holder, plan=plan)
 
     h = kit.agent(
         name="super_planner",
         role="super",
         instruction=prompts.SUPER_PLAN,
-        tools=[submit_plan],
+        tools=[submit_world, submit_tiles],
         label="plan world",
         q=origin.q,
         r=origin.r,
@@ -84,7 +122,7 @@ async def plan_world(
     parts = [text_part(payload)]
     if nearby_png:
         parts += [text_part("The existing map next to the new area:"), image_part(nearby_png)]
-    res = await h.run(parts, parent, max_calls=6)
+    res = await h.run(parts, parent, max_calls=8)
     if "plan" not in res:
         raise AgentFailed("planner did not submit a valid plan")
     return res["plan"]

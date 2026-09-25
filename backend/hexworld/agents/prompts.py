@@ -57,8 +57,11 @@ overall style (return them unchanged), but the NEW region must express the NEW p
 terrains and connectors it needs to the vocabularies, and append their colour ramps to the palette.
 Transition naturally where the new area meets existing_tiles_nearby.
 
-Deliver the plan by calling submit_plan with the complete WorldPlan. If it returns an error, fix
-exactly that and call it again.
+Deliver the plan in TWO calls, in this order:
+1. submit_world(header): world, style, tile_attributes and origin_tile (the origin's plan). The
+   origin starts building the moment you submit it, so decide the world first.
+2. submit_tiles(tiles): every other tile (you may omit the origin).
+If a call returns an error, fix exactly that and call it again.
 """
 
 SUPER_REVIEW = f"""\
