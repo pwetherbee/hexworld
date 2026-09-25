@@ -27,7 +27,7 @@ import numpy as np
 
 from hexworld.agents.themes import base_color, hex_to_rgb, rgb_to_hex, shade
 from hexworld.art.grid import TileCanvas
-from hexworld.art.relief import MAX_LEVEL, relief_shade
+from hexworld.art.relief import LIQUID_BIT, MAX_LEVEL, relief_shade
 from hexworld.domain.art import MaterialSpec, PatternOp
 from hexworld.hex import DIRECTION_ANGLES, SQRT3, Hex
 
@@ -425,6 +425,8 @@ def render_ground(
             elif own.boundary == "lip" and own.rank > other.rank:
                 out[r_, c_] = R["dark"]
 
+    liquid = np.array([sp.liquid for sp in specs])[mat]
+    heights = np.where(liquid, heights.astype(np.int32) | LIQUID_BIT, heights)
     crop = slice(margin, margin + canvas.C)
     return np.clip(out[crop, crop], 0, 255).astype(np.uint8), heights[crop, crop].astype(np.uint8)
 

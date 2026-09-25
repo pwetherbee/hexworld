@@ -14,7 +14,7 @@ import { SQRT3, hexToWorld } from "./hexMath";
 export const LEVEL_STEP = 0.055; // world units per relief level (1 hex radius = 32 texels)
 const LEVEL_SCALE = 40; // heightmap PNG value per level
 
-export type Levels = { C: number; data: Uint8Array };
+export type Levels = { C: number; data: Uint8Array; liquid: Uint8Array };
 
 const cache = new Map<string, Levels>();
 const pending = new Map<string, Promise<Levels>>();
@@ -30,8 +30,12 @@ async function loadLevels(id: string): Promise<Levels> {
   ctx.drawImage(bmp, 0, 0);
   const px = ctx.getImageData(0, 0, bmp.width, bmp.height).data;
   const data = new Uint8Array(bmp.width * bmp.height);
-  for (let k = 0; k < data.length; k++) data[k] = Math.round(px[k * 4] / LEVEL_SCALE);
-  return { C: bmp.width, data };
+  const liquid = new Uint8Array(bmp.width * bmp.height);
+  for (let k = 0; k < data.length; k++) {
+    data[k] = Math.round(px[k * 4] / LEVEL_SCALE);
+    liquid[k] = px[k * 4 + 1] > 127 && px[k * 4 + 2] < 64 ? 1 : 0; // G channel (grey = old format)
+  }
+  return { C: bmp.width, data, liquid };
 }
 
 /** The heightmap for `id`, or null while it loads (never a previous id's levels). */
@@ -148,13 +152,17 @@ export function reliefGeometry(q: number, r: number, heightId: string, lv: Level
   const U = (x: number) => (cx + x * s - ox) / C;
   const V = (z: number) => 1 - (cy + z * s - oy) / C;
 
+  const W = (i: number, j: number) => (i < 0 || j < 0 || i >= C || j >= C ? 0 : lv.liquid[j * C + i]);
   const pos: number[] = [];
   const uv: number[] = [];
   const col: number[] = [];
+  const wet: number[] = [];
+  let liquidNow = 0;
   const vert = (x: number, y: number, z: number, u: number, v: number, c: number) => {
     pos.push(x, y, z);
     uv.push(u, v);
     col.push(c, c, c);
+    wet.push(liquidNow);
   };
   const quad = (
     a: [number, number, number],
@@ -184,8 +192,10 @@ export function reliefGeometry(q: number, r: number, heightId: string, lv: Level
     let i = 0;
     while (i < C) {
       const lvl = L(i, j);
+      const liq = W(i, j);
       let k = i + 1;
-      while (k < C && L(k, j) === lvl) k++;
+      while (k < C && L(k, j) === lvl && W(k, j) === liq) k++;
+      liquidNow = liq;
       const x0 = X(ox + i);
       const x1 = X(ox + k);
       const poly = clipToHex([
@@ -203,6 +213,7 @@ export function reliefGeometry(q: number, r: number, heightId: string, lv: Level
       i = k;
     }
   }
+  liquidNow = 0;
 
   // --- walls between pixels of different level
   for (let j = 0; j < C; j++) {
@@ -277,8 +288,36 @@ export function reliefGeometry(q: number, r: number, heightId: string, lv: Level
   g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
   g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
   g.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
+  g.setAttribute("liquid", new THREE.Float32BufferAttribute(wet, 1));
   g.computeBoundingSphere();
   if (geoCache.size > 3000) geoCache.clear();
   geoCache.set(key, g);
   return g;
 }
+
+/** Shared clock for animated surfaces (advanced once per frame by the board). */
+export const SURFACE_TIME = { value: 0 };
+
+/**
+ * Relief material hook: liquid top faces get a slow, pixel-quantized shimmer (bands of +/- one
+ * brightness step sweeping across the water, snapped to the texel grid so it stays pixel art).
+ */
+export function reliefShader(shader: THREE.WebGLProgramParametersWithUniforms): void {
+  shader.uniforms.uTime = SURFACE_TIME;
+  shader.vertexShader = shader.vertexShader
+    .replace("#include <common>", "#include <common>\nattribute float liquid;\nvarying float vLiquid;")
+    .replace("#include <uv_vertex>", "#include <uv_vertex>\nvLiquid = liquid;");
+  shader.fragmentShader = shader.fragmentShader
+    .replace("#include <common>", "#include <common>\nuniform float uTime;\nvarying float vLiquid;")
+    .replace(
+      "#include <map_fragment>",
+      `#include <map_fragment>
+      if (vLiquid > 0.5) {
+        vec2 cell = floor(vMapUv * 67.0);
+        float band = sin(cell.x * 0.45 + cell.y * 0.8 - uTime * 1.8)
+                   + 0.6 * sin(cell.x * 1.3 - cell.y * 0.35 + uTime * 1.1);
+        diffuseColor.rgb *= 1.0 + 0.11 * step(1.2, band) - 0.05 * step(band, -1.25);
+      }`,
+    );
+}
+export const reliefShaderKey = () => "hexworld-relief-v1";

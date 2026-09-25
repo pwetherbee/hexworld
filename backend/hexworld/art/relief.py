@@ -5,7 +5,9 @@
   the same relief in a 3/4 view: below every rise its cliff face is drawn (LEVEL_PX pixels per
   level), coloured from the surface above it, with a dark foot and a soft shadow.
 
-Heightmap PNGs store level * LEVEL_SCALE in an 8-bit greyscale image on the tile canvas.
+Heightmap PNGs are RGB on the tile canvas: R = level * LEVEL_SCALE, G = 255 where the surface is
+a liquid (the 3D view animates it). In memory, `render_ground` returns levels with LIQUID_BIT set
+on liquid pixels; `split_levels` separates them.
 """
 
 from __future__ import annotations
@@ -18,18 +20,28 @@ from PIL import Image
 LEVEL_SCALE = 40
 MAX_LEVEL = 6
 LEVEL_PX = 2
+LIQUID_BIT = 64
+
+
+def split_levels(h: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    h = h.astype(np.int32)
+    return h & (LIQUID_BIT - 1), (h & LIQUID_BIT) > 0
 
 
 def levels_to_png(levels: np.ndarray) -> bytes:
+    lv, liquid = split_levels(levels)
+    rgb = np.zeros((*lv.shape, 3), np.uint8)
+    rgb[..., 0] = np.clip(lv, 0, MAX_LEVEL) * LEVEL_SCALE
+    rgb[..., 1] = np.where(liquid, 255, 0)
     buf = io.BytesIO()
-    Image.fromarray((np.clip(levels, 0, MAX_LEVEL) * LEVEL_SCALE).astype(np.uint8), "L").save(
-        buf, format="PNG"
-    )
+    Image.fromarray(rgb, "RGB").save(buf, format="PNG")
     return buf.getvalue()
 
 
 def load_levels(png: bytes) -> np.ndarray:
-    a = np.asarray(Image.open(io.BytesIO(png)).convert("L"), dtype=np.int32)
+    """Relief levels (without the liquid flag). Reads both RGB and older greyscale heightmaps."""
+    img = Image.open(io.BytesIO(png))
+    a = np.asarray(img.convert("RGB"), dtype=np.int32)[..., 0]
     return np.rint(a / LEVEL_SCALE).astype(np.int32)
 
 
@@ -37,7 +49,7 @@ def relief_shade(rgba: np.ndarray, levels: np.ndarray) -> np.ndarray:
     """3/4-view cliffs painted onto a flat ground (RGBA or RGB, same canvas as `levels`)."""
     H, W = levels.shape
     out = rgba.astype(np.float32).copy()
-    lv = levels.astype(np.int32)
+    lv = split_levels(levels)[0]
     wall_at = np.zeros((H, W), np.int32)  # 1-based row inside the wall of the rise above
     wall_rows = np.zeros((H, W), np.int32)
     for dy in range(1, LEVEL_PX * MAX_LEVEL + 2):

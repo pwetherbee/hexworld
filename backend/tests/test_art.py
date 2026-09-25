@@ -9,6 +9,7 @@ from hexworld.art.grid import TileCanvas, seam_delta
 from hexworld.art.paint import pixelize_sprite
 from hexworld.art.pixelize import crisp_tile, load_tile
 from hexworld.art.procedural import fallback_material, render_ground
+from hexworld.art.relief import load_levels
 from hexworld.domain.art import HeightOp
 from hexworld.hex import Hex
 
@@ -76,7 +77,7 @@ async def test_procedural_ground_exports_block_relief():
         update={"height": 2, "height_ops": [HeightOp(op="patches", scale=16, amount=0.5, delta=2)]}
     )
     _, res = await _tile(0, 0, "crags", [("crags", [])] * 6, materials={"crags": spec.model_dump()})
-    h = np.asarray(Image.open(io.BytesIO(res.height_png))) // 40
+    h = load_levels(res.height_png)
     assert h.min() >= 2 and h.max() == 4
     ox, oy = TileCanvas(Hex(0, 0), P).origin
     blocks: dict = {}
@@ -136,3 +137,13 @@ def test_load_tile_roundtrip():
     buf = io.BytesIO()
     Image.fromarray(arr, "RGBA").save(buf, format="PNG")
     assert (load_tile(buf.getvalue()) == arr).all()
+
+
+async def test_heightmap_marks_liquid_surfaces():
+    water = fallback_material("water").model_copy(update={"liquid": True, "height": 0, "height_ops": []})
+    _, res = await _tile(0, 0, "grass", [("water", [])] * 6, materials={"water": water.model_dump()})
+    rgb = np.asarray(Image.open(io.BytesIO(res.height_png)).convert("RGB"))
+    liquid = rgb[..., 1] > 127
+    c = TileCanvas(Hex(0, 0), P)
+    assert liquid[c.mask()].any() and not liquid[c.C // 2, c.C // 2]  # water band, grass centre
+    assert (load_levels(res.height_png)[liquid] == 0).all()

@@ -5,7 +5,7 @@ import type { TileLayer } from "../api/types.gen";
 import { useStore } from "../store";
 import { SHARED, hexOutlinePoints, tileFaceGeometry } from "./geometry";
 import { Spring, hexDistance, hexToWorld } from "./hexMath";
-import { LEVEL_STEP, levelAt, reliefGeometry, useLevels } from "./relief";
+import { LEVEL_STEP, levelAt, reliefGeometry, reliefShader, reliefShaderKey, useLevels } from "./relief";
 import { usePixelTexture } from "./textures";
 
 const FLASH_MS = 900;
@@ -222,7 +222,13 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
           reliefGeo ? (
             <mesh key="relief" geometry={reliefGeo} position={[0, height + 0.002, 0]}>
               {/* terraces extruded from the heightmap; unlit texture, walls shaded per vertex */}
-              <meshBasicMaterial map={tex} vertexColors side={THREE.DoubleSide} />
+              <meshBasicMaterial
+                map={tex}
+                vertexColors
+                side={THREE.DoubleSide}
+                onBeforeCompile={reliefShader}
+                customProgramCacheKey={reliefShaderKey}
+              />
             </mesh>
           ) : (
             <mesh key="flat" geometry={faceGeo} position={[0, height + 0.002, 0]}>

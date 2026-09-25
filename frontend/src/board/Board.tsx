@@ -1,4 +1,4 @@
-import { Canvas, useThree } from "@react-three/fiber";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { useEffect } from "react";
 import * as THREE from "three";
 import { useStore } from "../store";
@@ -6,6 +6,7 @@ import { CameraDirector } from "./CameraDirector";
 import { CameraRig, rig } from "./cameraRig";
 import { hexToWorld, parseKey } from "./hexMath";
 import { HexGrid } from "./HexGrid";
+import { SURFACE_TIME } from "./relief";
 import { TileMesh } from "./TileMesh";
 
 export function Board() {
@@ -18,6 +19,7 @@ export function Board() {
       <hemisphereLight args={["#dfe8ff", "#2a2233", 0.7]} />
       <directionalLight position={[-8, 16, -6]} intensity={1.5} />
       <CameraRig />
+      <SurfaceClock />
       <WorldFramer />
       {import.meta.env.DEV && <DevProbe />}
       <HexGrid />
@@ -69,5 +71,13 @@ function DevProbe() {
     w.__hexStore = useStore;
     w.__hexCamera = camera;
   }, [scene, camera]);
+  return null;
+}
+
+/** Advances the shared clock used by animated surfaces (water shimmer). */
+function SurfaceClock() {
+  useFrame(({ clock }) => {
+    SURFACE_TIME.value = clock.elapsedTime;
+  });
   return null;
 }
