@@ -82,7 +82,8 @@ class OpenAISpritePainter:
         self.model = model
         self.quality = quality
 
-    async def paint(self, prompt: str) -> bytes:
+    async def paint(self, prompt: str) -> tuple[bytes, dict[str, int]]:
+        """-> (png, usage) where usage has text/image input and output token counts."""
         r = await self._client.images.generate(
             model=self.model,
             prompt=prompt,
@@ -94,4 +95,16 @@ class OpenAISpritePainter:
         b64 = r.data[0].b64_json
         if not b64:
             raise RuntimeError("image model returned no image")
-        return base64.b64decode(b64)
+        usage: dict[str, int] = {}
+        u = getattr(r, "usage", None)
+        if u is not None:
+            details = getattr(u, "input_tokens_details", None)
+            usage = {
+                "input_tokens": int(getattr(u, "input_tokens", 0) or 0),
+                "output_tokens": int(getattr(u, "output_tokens", 0) or 0),
+                "text_input_tokens": int(getattr(details, "text_tokens", 0) or 0) if details else 0,
+                "image_input_tokens": int(getattr(details, "image_tokens", 0) or 0) if details else 0,
+            }
+            if not details:
+                usage["text_input_tokens"] = usage["input_tokens"]
+        return base64.b64decode(b64), usage

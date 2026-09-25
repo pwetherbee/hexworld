@@ -147,3 +147,10 @@ async def test_heightmap_marks_liquid_surfaces():
     c = TileCanvas(Hex(0, 0), P)
     assert liquid[c.mask()].any() and not liquid[c.C // 2, c.C // 2]  # water band, grass centre
     assert (load_levels(res.height_png)[liquid] == 0).all()
+
+
+def test_image_cost_uses_image_model_prices():
+    from hexworld.agents.llm import estimate_image_cost
+
+    usage = {"text_input_tokens": 200, "image_input_tokens": 0, "output_tokens": 1000}
+    assert abs(estimate_image_cost("gpt-image-2.5-flare", usage) - (200 * 5 + 1000 * 30) / 1e6) < 1e-12

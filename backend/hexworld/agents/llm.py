@@ -68,6 +68,23 @@ PRICING: dict[str, tuple[float, float, float]] = {
 UNKNOWN_MODEL_PRICING = (2.50, 0.25, 15.00)  # conservative, so per-run cost caps still bite
 
 
+# Image models, per 1M tokens: (text input, image input, image output)
+IMAGE_PRICING: dict[str, tuple[float, float, float]] = {
+    "gpt-image-2.5-flare": (5.00, 8.00, 30.00),
+    "gpt-image-2.5-sunburst": (5.00, 8.00, 30.00),
+    "gpt-image-1": (5.00, 10.00, 40.00),
+}
+UNKNOWN_IMAGE_PRICING = (5.00, 10.00, 40.00)
+
+
+def estimate_image_cost(model: str, usage: dict[str, int]) -> float:
+    match = max((m for m in IMAGE_PRICING if model.startswith(m)), key=len, default=None)
+    ptext, pimg_in, pout = IMAGE_PRICING[match] if match else UNKNOWN_IMAGE_PRICING
+    text_in = usage.get("text_input_tokens", usage.get("input_tokens", 0))
+    img_in = usage.get("image_input_tokens", 0)
+    return (text_in * ptext + img_in * pimg_in + usage.get("output_tokens", 0) * pout) / 1_000_000
+
+
 def estimate_cost(model: str, input_tokens: int, cached: int, output_tokens: int) -> float:
     model = model.split("/")[-1]
     match = max((m for m in PRICING if model.startswith(m)), key=len, default=None)
@@ -102,6 +119,11 @@ class RunBudget:
         s.cached_input_tokens += cached_input_tokens
         s.output_tokens += output_tokens
         s.cost_usd = round(s.cost_usd + cost_usd, 6)
+
+    def charge_image(self, cost_usd: float) -> None:
+        """Image-model spend (painted sprites): counts toward the run's $ budget."""
+        self.stats.cost_usd = round(self.stats.cost_usd + cost_usd, 6)
+        self.stats.image_cost_usd = round(self.stats.image_cost_usd + cost_usd, 6)
 
 
 # --------------------------------------------------------------------------- model listing

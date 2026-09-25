@@ -429,6 +429,7 @@ class RunStats(BaseModel):
     cached_input_tokens: int = 0
     output_tokens: int = 0
     cost_usd: float = 0.0
+    image_cost_usd: float = 0.0  # painted sprites (included in cost_usd)
     images: int = 0
     tiles_planned: int = 0
     tiles_accepted: int = 0

@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from hexworld.agents import prompts
 from hexworld.agents.kit import AgentHandle, AgentKit, coerce, image_part, submitted, text_part
+from hexworld.agents.llm import estimate_image_cost
 from hexworld.art.paint import pixelize_sprite, style_frame
 from hexworld.art.procedural import material_preview_png
 from hexworld.art.sprites import lint, preview_png, rasterize
@@ -151,7 +152,18 @@ class SpriteArtist:
             if self.renders >= MAX_RENDERS:
                 return {"error": "paint budget used (3): submit the best version with submit_sprite"}
             self.renders += 1
-            png = await self.painter.paint(style_frame(self.world.style, subject))
+            png, usage = await self.painter.paint(style_frame(self.world.style, subject))
+            cost = estimate_image_cost(self.painter.model, usage)
+            kit.budget.charge_image(cost)
+            kit.tracer.emit(
+                "image.painted",
+                data={
+                    "sprite": kind,
+                    "model": self.painter.model,
+                    "usage": usage,
+                    "cost_usd": round(cost, 6),
+                },
+            )
             try:
                 art = pixelize_sprite(png, size)
             except ValueError as e:

@@ -524,6 +524,7 @@ export interface RunStats {
   cached_input_tokens: number;
   output_tokens: number;
   cost_usd: number;
+  image_cost_usd: number;
   images: number;
   tiles_planned: number;
   tiles_accepted: number;
