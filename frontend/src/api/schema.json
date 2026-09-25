@@ -460,6 +460,40 @@
       "title": "Event",
       "type": "object"
     },
+    "HeightOp": {
+      "description": "Relief pattern, evaluated per BLOCK in world space: selected blocks are raised/lowered by\n`delta` levels (one level = one pixel-cube high).",
+      "properties": {
+        "op": {
+          "enum": [
+            "patches",
+            "cellfill",
+            "stripes",
+            "speckle"
+          ],
+          "type": "string"
+        },
+        "scale": {
+          "description": "Feature size in pixels (8-48 for block-scale relief).",
+          "type": "number"
+        },
+        "amount": {
+          "description": "0-1 coverage/density.",
+          "type": "number"
+        },
+        "delta": {
+          "description": "-2..+4 levels added to selected blocks.",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "op",
+        "scale",
+        "amount",
+        "delta"
+      ],
+      "title": "HeightOp",
+      "type": "object"
+    },
     "MaterialSpec": {
       "properties": {
         "base_color": {
@@ -495,6 +529,28 @@
           ],
           "type": "string"
         },
+        "block_style": {
+          "default": "bevel",
+          "description": "How each 8px block is drawn: 'bevel' (lit top-left, shaded bottom-right; stone, dirt, grass, obsidian), 'outline' (dark 1px frame: bricks, planks, tiles), 'flat' (liquids, snow, sand).",
+          "enum": [
+            "bevel",
+            "outline",
+            "flat"
+          ],
+          "type": "string"
+        },
+        "height": {
+          "default": 1,
+          "description": "Base relief level 0-4 (liquids 0, plains 1, hills 2, rock 3+).",
+          "type": "integer"
+        },
+        "height_ops": {
+          "description": "Relief patterns (<= 3), e.g. ridges.",
+          "items": {
+            "$ref": "#/$defs/HeightOp"
+          },
+          "type": "array"
+        },
         "ops": {
           "description": "Pattern layers in paint order (<= 8).",
           "items": {
@@ -517,6 +573,9 @@
         "liquid",
         "rank",
         "boundary",
+        "block_style",
+        "height",
+        "height_ops",
         "ops",
         "scatter"
       ],
@@ -758,12 +817,6 @@
           "minimum": 1,
           "type": "integer"
         },
-        "anchor_candidates": {
-          "default": 3,
-          "maximum": 6,
-          "minimum": 1,
-          "type": "integer"
-        },
         "review_batch": {
           "default": 12,
           "maximum": 16,
@@ -791,7 +844,6 @@
       "required": [
         "radius",
         "max_attempts",
-        "anchor_candidates",
         "review_batch",
         "max_llm_calls",
         "max_cost_usd",
@@ -1005,7 +1057,26 @@
           "type": "string"
         },
         "program": {
-          "$ref": "#/$defs/SpriteProgram"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpriteProgram"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "prompt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "asset_id": {
           "type": "string"
@@ -1047,6 +1118,7 @@
       "required": [
         "kind",
         "program",
+        "prompt",
         "asset_id",
         "px_w",
         "px_h",
@@ -1467,6 +1539,7 @@
         "kind": {
           "enum": [
             "ground",
+            "height",
             "sprite"
           ],
           "type": "string"
@@ -1567,6 +1640,11 @@
           "default": "",
           "description": "If the landmark sprite itself needs work: an instruction for the sprite artist. Else ''.",
           "type": "string"
+        },
+        "material_feedback": {
+          "default": "",
+          "description": "If a terrain's shared ground pattern looks wrong: '<material name>: instruction' for the material artist (repaints every tile using it). Else ''.",
+          "type": "string"
         }
       },
       "required": [
@@ -1574,7 +1652,8 @@
         "accept",
         "scores",
         "feedback",
-        "sprite_feedback"
+        "sprite_feedback",
+        "material_feedback"
       ],
       "title": "Verdict",
       "type": "object"

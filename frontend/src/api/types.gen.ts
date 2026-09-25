@@ -167,6 +167,18 @@ export interface MaterialSpec {
    */
   boundary: "lip" | "foam" | "glow" | "none";
   /**
+   * How each 8px block is drawn: 'bevel' (lit top-left, shaded bottom-right; stone, dirt, grass, obsidian), 'outline' (dark 1px frame: bricks, planks, tiles), 'flat' (liquids, snow, sand).
+   */
+  block_style: "bevel" | "outline" | "flat";
+  /**
+   * Base relief level 0-4 (liquids 0, plains 1, hills 2, rock 3+).
+   */
+  height: number;
+  /**
+   * Relief patterns (<= 3), e.g. ridges.
+   */
+  height_ops: HeightOp[];
+  /**
    * Pattern layers in paint order (<= 8).
    */
   ops: PatternOp[];
@@ -174,6 +186,28 @@ export interface MaterialSpec {
    * Ambient sprites for tiles of this material (<= 2 kinds).
    */
   scatter: ScatterSpec[];
+}
+/**
+ * Relief pattern, evaluated per BLOCK in world space: selected blocks are raised/lowered by
+ * `delta` levels (one level = one pixel-cube high).
+ *
+ * This interface was referenced by `ApiSchemas`'s JSON-Schema
+ * via the `definition` "HeightOp".
+ */
+export interface HeightOp {
+  op: "patches" | "cellfill" | "stripes" | "speckle";
+  /**
+   * Feature size in pixels (8-48 for block-scale relief).
+   */
+  scale: number;
+  /**
+   * 0-1 coverage/density.
+   */
+  amount: number;
+  /**
+   * -2..+4 levels added to selected blocks.
+   */
+  delta: number;
 }
 /**
  * One layer of a material, evaluated in world pixel coordinates (seamless across tiles).
@@ -235,7 +269,8 @@ export interface ScatterSpec {
  */
 export interface SpriteEntry {
   kind: string;
-  program: SpriteProgram;
+  program: SpriteProgram | null;
+  prompt: string | null;
   asset_id: string;
   px_w: number;
   px_h: number;
@@ -372,7 +407,7 @@ export interface EdgeSpec {
  * via the `definition` "TileLayer".
  */
 export interface TileLayer {
-  kind: "ground" | "sprite";
+  kind: "ground" | "height" | "sprite";
   asset_id: string;
   label: string;
   x: number;
@@ -473,7 +508,6 @@ export interface RunOptions {
    */
   radius: number;
   max_attempts: number;
-  anchor_candidates: number;
   review_batch: number;
   max_llm_calls: number;
   max_cost_usd: number;
@@ -652,6 +686,10 @@ export interface Verdict {
    * If the landmark sprite itself needs work: an instruction for the sprite artist. Else ''.
    */
   sprite_feedback: string;
+  /**
+   * If a terrain's shared ground pattern looks wrong: '<material name>: instruction' for the material artist (repaints every tile using it). Else ''.
+   */
+  material_feedback: string;
 }
 /**
  * This interface was referenced by `ApiSchemas`'s JSON-Schema

@@ -88,6 +88,7 @@ class ProceduralBackend:
 
     def _render(self, req: ImageRequest) -> tuple[bytes, bytes]:
         from hexworld.art.procedural import render_ground
+        from hexworld.art.relief import levels_to_png
 
         h = req.hints
         rgb, heights = render_ground(
@@ -101,9 +102,7 @@ class ProceduralBackend:
         big = np.repeat(np.repeat(rgb, up, 0), up, 1)
         buf = io.BytesIO()
         Image.fromarray(big, "RGB").save(buf, format="PNG")
-        hbuf = io.BytesIO()
-        Image.fromarray((heights * 40).astype(np.uint8), "L").save(hbuf, format="PNG")
-        return buf.getvalue(), hbuf.getvalue()
+        return buf.getvalue(), levels_to_png(heights)
 
 
 ProceduralStubBackend = ProceduralBackend  # backwards-compatible name

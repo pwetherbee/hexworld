@@ -43,6 +43,7 @@ from hexworld.art.grid import TileCanvas
 from hexworld.art.layout import PropRequest, layout_props
 from hexworld.art.pixelize import PixelTile, crisp_tile, load_tile, pixelize_to_canvas
 from hexworld.art.procedural import fallback_material, ramp_hexes, render_ground
+from hexworld.art.relief import levels_to_png, load_levels, relief_shade
 from hexworld.art.sprites import Placed, SpriteArt, flatten, preview_png, scatter_positions
 from hexworld.domain import (
     NO_COPY,
@@ -130,6 +131,7 @@ class RunExecutor:
         )
         self.tiles: dict[Hex, Tile] = {t.hex: t for t in self.store.list_tiles(world.id)}
         self._arrays: dict[str, np.ndarray] = {}
+        self._levels_cache: dict[str, np.ndarray] = {}
         self._budget_error: BudgetExceeded | None = None
         self._plan_notes: list[str] = []
         self._inflight: dict[str, asyncio.Future] = {}  # single-flight library generation
@@ -148,6 +150,7 @@ class RunExecutor:
         # runs off the critical path. A rejected tile keeps the edges neighbours used.
         self._busy: set[Hex] = set()
         self._provisional: dict[Hex, Candidate] = {}
+        self._freed = asyncio.Event()  # set whenever a tile stops being busy
         self._waiting: set[Hex] = set()  # rejected tiles waiting for busy neighbours before redesigning
         self._bg: set[asyncio.Task] = set()  # fire-and-forget library work (kept referenced)
         self.origin = run.origin.hex
@@ -565,7 +568,7 @@ class RunExecutor:
             )
             self._sprite_arts[layer.asset_id] = art
             placed.append(Placed(layer.label, art, layer.x, layer.y, layer.width / (art.w / (P / 2.0))))
-        flat = flatten(pix.rgba, placed, canvas)
+        flat = flatten(self._shaded(pix.rgba, height_id), placed, canvas)
         flat[~canvas.mask()] = 0
         flat_id = self.store.put_asset(to_png(Image.fromarray(flat, "RGBA")), {"kind": "tile_preview"})
         self._arrays[flat_id] = flat
@@ -738,7 +741,14 @@ class RunExecutor:
                 if layer.kind == "sprite"
             ]
             canvas = TileCanvas(t.hex, P)
-            flat = flatten(self._array(t.ground_asset_id), placed, canvas)
+            flat = flatten(
+                self._shaded(
+                    self._array(t.ground_asset_id),
+                    next((la.asset_id for la in t.layers if la.kind == "height"), None),
+                ),
+                placed,
+                canvas,
+            )
             flat[~canvas.mask()] = 0
             t.asset_id = self.store.put_asset(to_png(Image.fromarray(flat, "RGBA")), {"kind": "tile_preview"})
             self._arrays[t.asset_id] = flat
@@ -952,7 +962,7 @@ class RunExecutor:
                     motion=e.motion,
                 )
             )
-        flat = flatten(ground.rgba, placed, canvas)
+        flat = flatten(self._shaded(ground.rgba, height_id), placed, canvas)
         flat[~canvas.mask()] = 0
         return layers, flat
 
@@ -1003,8 +1013,24 @@ class RunExecutor:
                 coord=(t.q, t.r),
                 materials=materials,
             )
-            height_png = to_png(Image.fromarray((heights * 40).astype(np.uint8), "L"))
-        return self.store.put_asset(height_png, {"kind": "height", "q": t.q, "r": t.r})
+            height_png = levels_to_png(heights)
+        asset_id = self.store.put_asset(height_png, {"kind": "height", "q": t.q, "r": t.r})
+        self._levels_cache[asset_id] = load_levels(height_png)
+        return asset_id
+
+    def _levels(self, asset_id: str | None) -> np.ndarray | None:
+        if not asset_id:
+            return None
+        lv = self._levels_cache.get(asset_id)
+        if lv is None:
+            lv = load_levels(self.store.get_asset(asset_id))
+            self._levels_cache[asset_id] = lv
+        return lv
+
+    def _shaded(self, ground: np.ndarray, height_id: str | None) -> np.ndarray:
+        """2D previews show relief as 3/4-view cliffs (the 3D view extrudes the heightmap instead)."""
+        lv = self._levels(height_id)
+        return relief_shade(ground, lv) if lv is not None and lv.shape == ground.shape[:2] else ground
 
     # ================================================================== anchor bootstrap
 
@@ -1145,6 +1171,7 @@ class RunExecutor:
                         self._review_ready.set()
                         self._provisional[t.hex] = cand
                         self._busy.discard(t.hex)
+                        self._freed.set()
                         self._wake.set()  # neighbours may start now
                         v = await fut
                         self._provisional.pop(t.hex, None)
@@ -1192,17 +1219,20 @@ class RunExecutor:
         finally:
             self._busy.discard(t.hex)
             self._provisional.pop(t.hex, None)
+            self._freed.set()
             self._wake.set()
 
     async def _claim(self, h: Hex) -> None:
         """Before a retry: wait until no neighbour is mid-attempt, then mark this tile busy again, so
         neighbouring designs never overlap (a rejected tile redesigns against settled edges only)."""
         self._busy.discard(h)
+        self._freed.set()
         self._waiting.add(h)
         self._wake.set()
         try:
             while any(n in self._busy for n in h.neighbors()):
-                await asyncio.sleep(0.05)
+                self._freed.clear()
+                await self._freed.wait()
         finally:
             self._waiting.discard(h)
         self._busy.add(h)

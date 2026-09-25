@@ -1,4 +1,4 @@
-import { Canvas } from "@react-three/fiber";
+import { Canvas, useThree } from "@react-three/fiber";
 import { useEffect } from "react";
 import * as THREE from "three";
 import { useStore } from "../store";
@@ -19,6 +19,7 @@ export function Board() {
       <directionalLight position={[-8, 16, -6]} intensity={1.5} />
       <CameraRig />
       <WorldFramer />
+      {import.meta.env.DEV && <DevProbe />}
       <HexGrid />
       {world && (
         <>
@@ -56,4 +57,13 @@ function Tiles() {
       {Object.entries(tiles).map(([key, t]) => (t.status === "empty" ? null : <TileMesh key={key} tileKey={key} />))}
     </>
   );
+}
+
+/** Dev only: expose the scene for debugging from the browser console (window.__hexScene). */
+function DevProbe() {
+  const scene = useThree((s) => s.scene);
+  useEffect(() => {
+    (window as unknown as { __hexScene?: unknown }).__hexScene = scene;
+  }, [scene]);
+  return null;
 }

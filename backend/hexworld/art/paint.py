@@ -22,7 +22,12 @@ SIZES = {"small": 12, "medium": 24, "large": 36}  # large stays inside its own t
 MAX_WIDTH = 30
 
 
-def pixelize_sprite(png: bytes, size: str = "medium", colors: int = 20) -> SpriteArt:
+def pixelize_sprite(png: bytes, size: str = "medium", colors: int = 14) -> SpriteArt:
+    """Painting -> game-scale pixel sprite: crop to the subject, punch up contrast (detail is lost
+    at ~30px, so values must separate), box-downsample, reduce to a small palette, harden alpha,
+    drop orphan pixels, add the bold outline."""
+    from PIL import ImageEnhance
+
     img = Image.open(io.BytesIO(png)).convert("RGBA")
     a = np.asarray(img)
     solid = a[..., 3] >= 128
@@ -30,6 +35,10 @@ def pixelize_sprite(png: bytes, size: str = "medium", colors: int = 20) -> Sprit
         raise ValueError("the painting is empty (fully transparent)")
     ys, xs = np.nonzero(solid)
     crop = img.crop((xs.min(), ys.min(), xs.max() + 1, ys.max() + 1))
+    rgb = crop.convert("RGB")
+    rgb = ImageEnhance.Contrast(rgb).enhance(1.25)
+    rgb = ImageEnhance.Color(rgb).enhance(1.2)
+    crop = Image.merge("RGBA", (*rgb.split(), crop.getchannel("A")))
     target_h = SIZES.get(size, SIZES["medium"])
     scale = target_h / crop.height
     if crop.width * scale > MAX_WIDTH:
@@ -37,20 +46,29 @@ def pixelize_sprite(png: bytes, size: str = "medium", colors: int = 20) -> Sprit
     w, h = max(3, round(crop.width * scale)), max(3, round(crop.height * scale))
     small = np.asarray(crop.resize((w, h), Image.Resampling.BOX)).copy()
     alpha = small[..., 3] >= 110
-    # reduce colours on the opaque pixels only
-    rgb = Image.fromarray(small[..., :3], "RGB").quantize(colors=colors, method=Image.Quantize.MEDIANCUT)
-    rgbq = np.asarray(rgb.convert("RGB"))
+    alpha = _drop_orphans(alpha)
+    q = Image.fromarray(small[..., :3], "RGB").quantize(colors=colors, method=Image.Quantize.MEDIANCUT)
+    rgbq = np.asarray(q.convert("RGB"))
     out = np.zeros((h, w, 4), dtype=np.uint8)
     out[alpha, :3] = rgbq[alpha]
     out[alpha, 3] = 255
     return SpriteArt(frames=[_outlined(out, hex_to_rgb(OUTLINE))], motion="none")
 
 
+def _drop_orphans(mask: np.ndarray) -> np.ndarray:
+    """Remove opaque pixels with at most one opaque 4-neighbour (antialiasing crumbs, spikes)."""
+    p = np.pad(mask, 1)
+    n = p[:-2, 1:-1].astype(int) + p[2:, 1:-1] + p[1:-1, :-2] + p[1:-1, 2:]
+    return mask & (n >= 2)
+
+
 def style_frame(style: Any, subject: str) -> str:
     keywords = getattr(style, "style_keywords", "") if style else ""
     return (
-        "Terraria-style 16-bit pixel art game sprite, side view, bold dark outline, flat vibrant colours "
-        "with 3-4 tone shading lit from the top-left, crisp chunky pixels, no anti-aliasing. "
+        "Terraria-style 16-bit pixel art game sprite, side view, designed to read at 32x32 pixels: "
+        "a bold, simple, chunky silhouette made of a few large shapes, thick dark outline, flat "
+        "vibrant colours with 3-tone shading lit from the top-left, strong value contrast, big "
+        "visible pixels, no thin spikes or fine detail, no anti-aliasing. "
         f"{keywords}. Subject: {subject}. A single isolated object, centered, fully visible, "
         "transparent background, no ground, no drop shadow, no glow halo, no text."
     )

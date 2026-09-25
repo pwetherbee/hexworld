@@ -5,6 +5,7 @@ import type { TileLayer } from "../api/types.gen";
 import { useStore } from "../store";
 import { SHARED, hexOutlinePoints, tileFaceGeometry } from "./geometry";
 import { Spring, hexDistance, hexToWorld } from "./hexMath";
+import { LEVEL_STEP, levelAt, reliefGeometry, useLevels } from "./relief";
 import { usePixelTexture } from "./textures";
 
 const FLASH_MS = 900;
@@ -70,6 +71,15 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
   const faceGeo = useMemo(
     () => (texW && texW > 8 ? tileFaceGeometry(tile.q, tile.r, texW - 3) : SHARED.face),
     [tile.q, tile.r, texW],
+  );
+  const heightLayer = accepted ? tile.layers?.find((l) => l.kind === "height") : undefined;
+  const levels = useLevels(heightLayer?.asset_id);
+  const reliefGeo = useMemo(
+    () =>
+      levels && heightLayer && texW && levels.C === texW
+        ? reliefGeometry(tile.q, tile.r, heightLayer.asset_id, levels)
+        : null,
+    [levels, heightLayer, texW, tile.q, tile.r],
   );
   const isCopy = accepted && !!tile.copy_mode;
   const planDelay = origin ? hexDistance(origin, tile) * PLAN_STAGGER_MS : 0;
@@ -208,16 +218,23 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
           />
         </mesh>
         {tex && (
-          <mesh geometry={faceGeo} position={[0, height + 0.002, 0]}>
-            {/* unlit: the pixel art shows its exact colours */}
-            <meshBasicMaterial map={tex} transparent={!accepted} opacity={accepted ? 1 : 0.85} alphaTest={0.5} />
-          </mesh>
+          reliefGeo ? (
+            <mesh geometry={reliefGeo} position={[0, height + 0.002, 0]}>
+              {/* terraces extruded from the heightmap; unlit texture, walls shaded per vertex */}
+              <meshBasicMaterial map={tex} vertexColors side={THREE.DoubleSide} />
+            </mesh>
+          ) : (
+            <mesh geometry={faceGeo} position={[0, height + 0.002, 0]}>
+              {/* unlit: the pixel art shows its exact colours */}
+              <meshBasicMaterial map={tex} transparent={!accepted} opacity={accepted ? 1 : 0.85} alphaTest={0.5} />
+            </mesh>
+          )
         )}
         {sprites.map((layer, i) => (
           <SpriteBillboard
             key={`${layer.asset_id}-${i}`}
             layer={layer}
-            top={height}
+            top={height + (levels ? levelAt(levels, tile.q, tile.r, layer.x, layer.y) * LEVEL_STEP : 0)}
             tileX={x}
             tileZ={z}
             index={i}

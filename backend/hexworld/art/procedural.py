@@ -5,9 +5,9 @@ square BLOCKS (8px at the default 64px tiles). Materials are assigned per block,
 roads and coastlines have clean block-grid edges instead of noisy pixel soup. Each block is drawn
 in its material's block style ('bevel': lit top-left edge, shaded bottom-right; 'outline': dark
 1px frame; 'flat'). Pattern ops add chunky block-level variation (patches/cellfill/stripes) and
-pixel-level detail (speckle/decals/cracks). Every block also gets a relief level (material base
-height + height ops), which is exported as a heightmap for the voxel renderer and shaded into the
-2D texture.
+pixel-level detail (speckle/decals/cracks). Every cell also gets a relief level (material base
+height + height ops), exported as the heightmap layer (see art/relief.py): the ground colours are
+flat surfaces; the 3D view extrudes the heightmap and 2D previews shade it in.
 
 Each pixel's block takes the tile's biome in the middle and the edge contract's terrain in a
 band along each edge. All ops are evaluated in world coordinates with seeds derived from the
@@ -27,11 +27,11 @@ import numpy as np
 
 from hexworld.agents.themes import base_color, hex_to_rgb, rgb_to_hex, shade
 from hexworld.art.grid import TileCanvas
+from hexworld.art.relief import MAX_LEVEL, relief_shade
 from hexworld.domain.art import MaterialSpec, PatternOp
 from hexworld.hex import DIRECTION_ANGLES, SQRT3, Hex
 
 RAMP_FACTORS = {"outline": 0.42, "dark": 0.72, "base": 1.0, "light": 1.24, "hi": 1.5}
-MAX_LEVEL = 6
 
 
 def block_size(tile_px: int) -> int:
@@ -287,31 +287,6 @@ def frame_blocks(img: np.ndarray, mat: np.ndarray, heights: np.ndarray, ctx: Ctx
             img[m & (up | left | down | right)] = ramps[k]["outline"]
 
 
-def paint_cliffs(img: np.ndarray, mat: np.ndarray, heights: np.ndarray, ctx: Ctx, ramps) -> None:
-    """3/4-view relief: below every rise (seen from the south) its cliff face is drawn, 2px per
-    level, following the plateau's organic contour, with a dark foot and a soft shadow."""
-    H, W = mat.shape
-    dark = np.stack([r["dark"] for r in ramps])
-    outline = np.stack([r["outline"] for r in ramps])
-    best = np.zeros((H, W), np.int32)  # rows into the wall (1-based) of the tallest face over this pixel
-    src = np.zeros((H, W), np.int64)
-    rows_of = np.zeros((H, W), np.int32)
-    for dy in range(1, 2 * MAX_LEVEL + 2):
-        above_h = np.pad(heights, ((dy, 0), (0, 0)), mode="edge")[:H]
-        above_m = np.pad(mat, ((dy, 0), (0, 0)), mode="edge")[:H]
-        rows = (2 * (above_h - heights) + 1).astype(np.int32)  # wall height below that rise
-        hit = (above_h > heights) & (rows >= dy) & (best == 0)
-        best[hit], src[hit], rows_of[hit] = dy, above_m[hit], rows[hit]
-    wall = best > 0
-    face = dark[src]
-    face = np.where((np.floor(ctx.wx) % 4 == 0)[..., None], face * 0.84, face)
-    face = np.where((best == 1)[..., None], np.minimum(255, face * 1.15), face)
-    face = np.where((best == rows_of)[..., None], outline[src], face)
-    img[wall] = face[wall]
-    below = np.pad(wall, ((1, 0), (0, 0)))[:H] & ~wall
-    img[below] = img[below] * 0.72
-
-
 def material_heights(ctx: Ctx, spec: MaterialSpec, name: str) -> np.ndarray:
     h = np.full(ctx.wx.shape, float(spec.height))
     for i, op in enumerate(spec.height_ops):
@@ -439,7 +414,6 @@ def render_ground(
             elif own.boundary == "lip" and own.rank > other.rank:
                 out[r_, c_] = R["dark"]
 
-    paint_cliffs(out, mat, heights, ctx, ramps)
     crop = slice(margin, margin + canvas.C)
     return np.clip(out[crop, crop], 0, 255).astype(np.uint8), heights[crop, crop].astype(np.uint8)
 
@@ -465,14 +439,17 @@ def material_preview_png(
         (Hex(1, -1), same),
         (Hex(2, 0), mixed),
     ):
-        rgb, _ = render_ground(tile_px=tile_px, biome=name, edges=edges, coord=(h.q, h.r), materials=mats)
+        rgb, levels = render_ground(
+            tile_px=tile_px, biome=name, edges=edges, coord=(h.q, h.r), materials=mats
+        )
+        rgb = relief_shade(rgb, levels)
         canvas = TileCanvas(h, tile_px)
         rgba = np.zeros((canvas.C, canvas.C, 4), np.uint8)
         m = canvas.mask()
         rgba[m, :3] = rgb[m]
         rgba[m, 3] = 255
         tiles[h] = rgba
-    img = render_region(tiles, tile_px=tile_px, scale=3)
+    img = render_region(tiles, tile_px=tile_px, scale=3)  # (relief shaded per tile above)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
