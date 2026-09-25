@@ -4,9 +4,9 @@ Click an empty hex, describe a world or a board game, and watch a team of agents
 
 A **super agent** (the board creator) plans the region and sets the rules: the world spec, a shared
 pixel-art style guide, the tile attribute schema, and which slots to fill, leave empty, or
-**duplicate**. **Tile agents** then design and paint each hex in parallel, using their
-surroundings as context. The super reviews every wave with vision and accepts or rejects each tile,
-with concrete feedback for the rejected ones.
+**duplicate**. **Tile agents** design each hex against their surroundings. **Material and sprite
+artists** create the world's assets on demand. The super reviews every candidate with vision and
+routes feedback to whichever agent owns the problem.
 
 The project is a testbed for multi-agent coordination that is **robust, observable and efficient**.
 
@@ -27,9 +27,10 @@ uv run --project backend hexworld serve      # API on :8000
 pnpm --dir frontend dev                      # UI on :5173
 ```
 
-Open http://localhost:5173 and click a hex. Every role (super, tile agents, material artist, sprite
-artist) runs on a real model configured per role in `.env`. `hexworld models` lists what your key
-can use. Real responses are recorded, so `HEXWORLD_LLM=replay` can re-run a run for free.
+Open http://localhost:5173 and click a hex. Every role runs on a real model configured per role in
+`.env` (default `gpt-6-luna`). Sprites are painted by an image model (`HEXWORLD_SPRITE_IMAGE_MODEL`,
+default `gpt-image-2.5-flare`); set it empty to have the sprite artist draw with the sprite DSL
+instead. `hexworld models` lists what your key can use.
 
 ## Agents (Google ADK)
 
@@ -37,60 +38,85 @@ Every run is a collaboration between ADK agents with tools, each in its own pers
 
 | agent | tools | job |
 |---|---|---|
-| **super planner** | `submit_plan` | world spec, style, game-specific tile attributes, the map plan (regions, landmarks, copies) |
-| **super anchor** | `submit_anchor` | picks the style anchor from renders of the origin tile |
-| **super reviewer** | `zoom_candidate`, `submit_verdicts` | reviews each wave with vision; routes feedback to the tile agent, the material artist or the sprite artist |
-| **super director** | `view_map`, `list_pending`, `update_tiles`, `commission_sprite`, `redo_tile`, `finish` | checks in after every ring and steers the rest of the build |
-| **tile agent** (one per tile) | `view_surroundings`, `list_library`, `request_prop`, `submit_design` | designs its tile against its neighbours; revises in the same session when rejected |
-| **material artist** | `render_material`, `submit_material` | draws a terrain's ground pattern, *looks at its render*, revises, submits |
-| **sprite artist** | `render_sprite`, `submit_sprite` | draws a prop from pixel primitives, *looks at its render*, revises, submits |
+| **super planner** | `submit_plan` | world spec, style, game-specific tile attributes, the map plan (regions, features, copies) |
+| **super reviewer** | `zoom_candidate`, `submit_verdicts` | reviews candidates with vision; routes feedback to the tile agent, the material artist or the sprite artist |
+| **super director** | `view_map`, `list_pending`, `update_tiles`, `commission_sprite`, `redo_tile`, `finish` | checks in during the build and steers what hasn't been built yet |
+| **tile agent** (one per tile) | `view_surroundings`, `list_library`, `request_prop`, `submit_design` | designs its tile (biome, edges, connectors, up to 4 props) against its neighbours; revises in the same session when rejected |
+| **material artist** | `render_material`, `submit_material` | designs a terrain's ground pattern and relief, *looks at its render*, revises, submits |
+| **sprite artist** | `paint_sprite`, `submit_sprite` | art-directs a prop: an image model paints it, the engine pixelizes it to game scale, the artist *looks* and repaints until it reads |
 
-Budgets (calls, $, wall clock), per-agent call caps, validation and the wave scheduler live in the
+Budgets (calls, $, wall clock), per-agent call caps, validation and scheduling live in the
 orchestrator. Every agent turn, LLM call and tool call is traced into the event stream, and the
 inspector's **Agents** tab shows each session as a transcript.
 
 ## Nothing is prebaked
 
-The engine contains interpreters, not content. The **material DSL** (`art/procedural.py`: colour
-ramp + patches, stripes, voronoi cells + bevel, cellfill, speckle, pixel decals, boundary style)
-renders in world space, so tiles are seamless by construction. The **sprite DSL**
-(`art/sprites.py`: rect/ellipse/tri/line/pixel with ramp tones, auto-shading, frames and motion)
-rasterizes to outlined animation strips. The world's **session library** starts empty and grows
-only when a tile or agent first needs an asset. Each one is designed once and reused, and a
-material revision repaints every tile that uses it.
+The engine contains interpreters, not content. The world's **session library** starts empty and
+grows only when a tile or agent first needs an asset (single-flighted: concurrent requests share one
+generation). Each asset is designed once and reused, and a material revision repaints every tile
+that uses it.
+
+- **Materials** are written in a small DSL (`art/procedural.py`): colour ramp, pattern ops
+  (patches, stripes, voronoi cells and cobbles, cellfill, speckle, pixel decals), block style,
+  boundary treatment, relief (base height + height ops) and ambient scatter.
+- **Sprites** are painted by an image model from the sprite artist's art direction, then reduced
+  to game-scale pixel art with a bold outline (`art/paint.py`). Without an image model, they are
+  drawn with the sprite DSL (`art/sprites.py`).
+
+## The art engine
+
+- **One world pixel grid** (`art/grid.py`). Every tile is a window onto a single world canvas:
+  tile canvases start at integer world pixels, so neighbours paint identical pixels where they
+  meet. Tile borders are straight geometric cuts through one continuous texture.
+- **Terraria-style ground.** Materials are assigned per 2px art cell, with noise-warped organic
+  contours (no square staircases). Surfaces of the same material merge, and framing is drawn only
+  on exposed faces. Solids get grain, liquids get glints.
+- **Pixel relief.** Each cell has a relief level, exported as the tile's heightmap layer
+  (`art/relief.py`). The 3D board extrudes it into terraces with real walls, clipped exactly to
+  the hex. 2D previews (review sheets, thumbnails) shade the same relief as 3/4-view cliffs.
+- **Layers.** Each tile has a ground layer, a height layer and sprite layers. Up to 4 agent-chosen
+  props (at most one landmark) plus ambient scatter are fitted by a layout engine
+  (`art/layout.py`), so they stay inside the hex and don't overlap.
 
 ## How a run works
 
 ```
-prompt ─▶ super.plan ──▶ anchor bootstrap ──▶ waves (ring by ring, 3-colour classes) ──▶ done
-           world spec     N origin renders     ┌─ tile agents design (parallel, LLM)
-           style guide    super picks one      ├─ image: inpaint INTO the accepted neighbours
-           tile schema    with vision =        ├─ pixelize: palette-first + hex mask
-           slots/copies   the style anchor     ├─ deterministic checks (edges, seams, coverage)
-                                               ├─ super reviews the whole wave in 1 vision call
-                                               └─ reject → retry with feedback → simplified → failed
+prompt ─▶ super.plan ─▶ streaming growth from the origin ─────────────────────────▶ done
+           world spec     a tile starts when it touches a settled tile and no
+           style guide    neighbour is mid-attempt:
+           tile schema      tile agent designs ─▶ materials/sprites on demand ─▶ render
+           slots/copies     ─▶ deterministic checks ─▶ PROVISIONALLY SETTLED (neighbours may start)
+                            ─▶ super reviews (batched, off the critical path)
+                            ─▶ accept | reject → revise in-session (edges neighbours used stay locked)
+                          director check-ins steer the remaining plan
 ```
 
-- **Waves.** Within a ring, tiles are split by hex 3-colouring (`(q - r) mod 3`), so no two tiles
-  in a wave are adjacent. Every tile then sees only accepted neighbours, the wave runs fully in
-  parallel, and it gets reviewed in one batched vision call.
-- **Surroundings.** Each tile agent gets its neighbours' edge contracts, summaries and art prompts,
-  plus an image of the map around its slot. The image model inpaints the new tile into a canvas of
-  the real neighbour pixels. An edge contract (terrain + connectors per edge) is enforced
-  deterministically, and a pixel seam metric rejects visible seams before the super ever looks.
+- **Streaming growth.** There are no rings or waves. The scheduler starts any planned tile that
+  touches the settled world, prioritising tiles with many settled neighbours. Neighbouring
+  *attempts* never overlap, so every design is made against fixed neighbour edges.
+- **Provisional settle.** Once a candidate passes the deterministic checks, its edges are frozen and
+  neighbours may build against it while the super reviews it. A rejected tile revises its content,
+  but keeps any edges a neighbour has already used. A last attempt that passes every check is
+  accepted rather than leaving a hole in the world.
+- **Surroundings.** Each tile agent gets a lean brief: world vocabulary, its directive and its
+  neighbours' edge contracts. Images and the library sit behind tools. Edge contracts are enforced
+  deterministically, and a seam metric (colour sets per edge segment) rejects visible seams before
+  the super ever looks.
+- **Feedback routing.** The reviewer says who should fix a problem. Tile problems go back to the
+  tile agent's session. Ground-pattern problems go to the material artist, whose fix repaints every
+  tile using that material. Sprite problems go to that sprite's artist.
 - **Copies.** The super can mark filler slots (open sea, plain desert) as copies of a prototype
   tile. A **shallow** copy is a linked instance that follows its prototype. A **deep** copy is an
-  independent snapshot. Copies cost no LLM or image calls, but must pass the same edge and seam
-  checks. If one doesn't fit its surroundings, that slot is generated instead.
-- **Robustness.** Strict structured outputs validated by pydantic/jsonschema with one repair
-  round-trip. Tenacity retries on transient errors, per-run budgets (calls, $, wall clock) and
-  cancellation. An image circuit breaker falls back to another backend. One tile's failure never
-  sinks its wave, and a crashed run resumes from SQLite on restart.
-- **Observability.** Every step is a typed event with hierarchical spans (run → wave → tile
-  attempt → llm call / image). Events are persisted to SQLite + JSONL and streamed over WebSocket.
-  The UI inspector has a trace timeline, per-tile attempt history (images, seams, verdicts,
-  feedback) and token/cost counters. `hexworld runs show <id>` prints p50/p95 latencies and
-  acceptance rates.
+  independent snapshot. Copies cost no LLM calls and are re-rendered in place, so they stay
+  seamless with their own neighbours.
+- **Robustness.** Structured tool submissions are validated, and errors go back to the agent.
+  Transient errors are retried, and each run has budgets (calls, $, wall clock) and can be
+  cancelled. One tile's failure never sinks the run, and a crashed run resumes from SQLite on
+  restart.
+- **Observability.** Every step is a typed event with hierarchical spans (run → tile job → attempt
+  → design / image / layers / review → llm call). Events are persisted to SQLite + JSONL and
+  streamed over WebSocket. The UI inspector has a trace timeline, per-tile attempt history,
+  agent transcripts and token/cost counters.
 
 ## UI
 
@@ -102,19 +128,20 @@ build (rate-limited and smoothed, and it pauses whenever you grab the camera). *
 
 ```
 backend/hexworld/
-  hex/            axial math, rings, 3-colouring, edge geometry
-  domain/         pydantic models (plan, directive, design, tile, run, copy spec…)
-  agents/         super.py, tile.py, prompts.py, llm.py (OpenAI/fake/record/replay + gateway), fake.py
-  art/            backend.py (stub/ComfyUI/OpenAI/circuit breaker), pixelize.py, composite.py
-  orchestrator/   run.py (state machine + waves), copies.py, validators.py, runtime.py
+  hex/            axial math, edge geometry
+  domain/         pydantic models (plan, directive, design, tile, run, library…)
+  agents/         ADK kit, super / director / tile / artist agents, prompts, fake test brain
+  art/            grid.py (world pixel grid), procedural.py (material DSL), relief.py,
+                  paint.py (painted sprites), sprites.py (sprite DSL, flatten), layout.py,
+                  pixelize.py, composite.py, backend.py (image backends)
+  orchestrator/   run.py (scheduler, library, review), copies.py, validators.py, runtime.py
   telemetry/      events + spans, event bus
   store.py        SQLite + content-addressed PNG assets
   api/            FastAPI REST + WebSocket stream
 frontend/src/
-  board/          three.js board (react-three-fiber), tile animations, camera director
+  board/          three.js board (react-three-fiber): relief meshes, sprites, camera rig/director
   ui/             minimal chrome, inspector drawer, prompt card
   api/            typed client (types generated from backend schema: `pnpm gen:types`)
-services/comfyui/ workflow templates + setup notes
 ```
 
 ## Checks

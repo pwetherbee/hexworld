@@ -36,7 +36,6 @@ class FakeClient:
         "world_plan": ("submit_plan", "plan"),
         "tile_design": ("submit_design", "design"),
         "wave_review": ("submit_verdicts", None),
-        "anchor_pick": ("submit_anchor", None),
         "material_design": ("submit_material", "spec"),
         "sprite_design": ("submit_sprite", "program"),
     }
@@ -322,9 +321,6 @@ class FakeClient:
                 },
             ],
         }
-
-    def _anchor_pick(self, p: dict[str, Any], rng: random.Random) -> dict[str, Any]:
-        return {"best_label": 1 + rng.randrange(p["num_candidates"]), "reason": "Cleanest read of the biome."}
 
 
 def _noise(h: Hex, seed: float) -> float:

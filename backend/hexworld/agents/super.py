@@ -1,7 +1,6 @@
 """The super agent (board creator), on Google ADK.
 
 - planner: produces the WorldPlan through `submit_plan`; validation errors go back to it.
-- anchor picker: looks at candidate renders of the origin and picks the style anchor.
 - reviewer: reviews each wave with vision, can zoom into candidates, and can address feedback to
   the tile agent (tile feedback) and to the sprite artist (sprite_feedback).
 The director (mid-run management) lives in agents/director.py.
@@ -14,7 +13,7 @@ from pydantic import ValidationError
 
 from hexworld.agents import prompts
 from hexworld.agents.kit import AgentKit, coerce, image_part, submitted, text_part
-from hexworld.domain import AnchorPick, Verdict, WaveReview, World, WorldPlan
+from hexworld.domain import Verdict, WaveReview, World, WorldPlan
 from hexworld.hex import Hex
 from hexworld.telemetry import Span
 
@@ -89,44 +88,6 @@ async def plan_world(
     if "plan" not in res:
         raise AgentFailed("planner did not submit a valid plan")
     return res["plan"]
-
-
-async def pick_anchor(
-    kit: AgentKit, *, world: World, intent: str, candidates: list[bytes], parent: Span | None
-) -> AnchorPick:
-    n = len(candidates)
-    holder: dict[str, Any] = {}
-
-    def submit_anchor(best_label: int, reason: str, tool_context: ToolContext) -> dict:
-        """Choose the style anchor: the label (1..N) of the best candidate, and why."""
-        if not 1 <= best_label <= n:
-            return {"error": f"best_label must be in 1..{n}"}
-        return submitted(tool_context, holder, pick=AnchorPick(best_label=best_label, reason=reason))
-
-    h = kit.agent(
-        name="super_anchor",
-        role="super",
-        instruction=prompts.SUPER_ANCHOR,
-        tools=[submit_anchor],
-        label="pick style anchor",
-        holder=holder,
-    )
-    parts = [
-        text_part(
-            {
-                "task": "anchor_pick",
-                "world": world.spec.model_dump() if world.spec else None,
-                "origin_intent": intent,
-                "num_candidates": n,
-            }
-        )
-    ]
-    for i, png in enumerate(candidates):
-        parts += [text_part(f"Candidate {i + 1}:"), image_part(png)]
-    res = await h.run(parts, parent, max_calls=3)
-    if "pick" not in res:
-        raise AgentFailed("anchor pick not submitted")
-    return res["pick"]
 
 
 async def review_wave(

@@ -97,14 +97,6 @@ per review; call them in parallel in one step). Finish with submit_verdicts (one
 `your_recent_reviews` reminds you of earlier decisions this run. Stay consistent.
 """
 
-SUPER_ANCHOR = """\
-You are the SUPER agent of HexWorld choosing the style ANCHOR tile for a new world. The images are
-candidate renderings of the origin tile, labeled 1..N. Pick the one that best combines: clean,
-readable pixel art; faithful use of the palette; good fit to the world theme and the origin tile's
-intent; and would work as a reference style for every other tile on the map.
-Answer with submit_anchor(best_label, reason).
-"""
-
 TILE_DESIGN = f"""\
 You are a TILE agent in HexWorld. You design exactly one hex tile, following the super agent's
 directive and the world's style guide. A tile is layered: a seamless GROUND layer (painted from
