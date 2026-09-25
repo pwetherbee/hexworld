@@ -38,7 +38,7 @@ Every run is a collaboration between ADK agents with tools, each in its own pers
 
 | agent | tools | job |
 |---|---|---|
-| **super planner** | `submit_plan` | world spec, style, game-specific tile attributes, the map plan (regions, features, copies) |
+| **super planner** | `submit_world`, `submit_tiles` | world spec, style, game-specific tile attributes and the origin tile first (the origin starts building at once), then the rest of the map plan (regions, features, copies) |
 | **super reviewer** | `zoom_candidate`, `submit_verdicts` | reviews candidates with vision; routes feedback to the tile agent, the material artist or the sprite artist |
 | **super director** | `view_map`, `list_pending`, `update_tiles`, `commission_sprite`, `redo_tile`, `finish` | checks in during the build and steers what hasn't been built yet |
 | **tile agent** (one per tile) | `view_surroundings`, `list_library`, `request_prop`, `submit_design` | designs its tile (biome, edges, connectors, up to 4 props) against its neighbours; revises in the same session when rejected |
@@ -81,7 +81,7 @@ that uses it.
 ## How a run works
 
 ```
-prompt ─▶ super.plan ─▶ streaming growth from the origin ─────────────────────────▶ done
+prompt ─▶ super.plan (world + origin first, then the rest) ─▶ streaming growth ────▶ done
            world spec     a tile starts when it touches a settled tile and no
            style guide    neighbour is mid-attempt:
            tile schema      tile agent designs ─▶ materials/sprites on demand ─▶ render
@@ -102,7 +102,8 @@ prompt ─▶ super.plan ─▶ streaming growth from the origin ─────
   neighbours' edge contracts. Images and the library sit behind tools. Edge contracts are enforced
   deterministically, and a seam metric (colour sets per edge segment) rejects visible seams before
   the super ever looks.
-- **Feedback routing.** The reviewer says who should fix a problem. Tile problems go back to the
+- **Feedback routing.** The reviewer sees each candidate's sprites with their owner (tile prop or
+  a material's ambient scatter) and says who should fix a problem. Tile problems go back to the
   tile agent's session. Ground-pattern problems go to the material artist, whose fix repaints every
   tile using that material. Sprite problems go to that sprite's artist.
 - **Copies.** The super can mark filler slots (open sea, plain desert) as copies of a prototype
