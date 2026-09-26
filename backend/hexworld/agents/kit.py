@@ -271,7 +271,7 @@ def openai_model_factory(settings: Any) -> Callable[[Role], BaseLlm]:
         kwargs: dict[str, Any] = {
             "api_key": settings.openai_api_key,
             "drop_params": True,
-            "timeout": settings.llm_timeout_s,
+            "timeout": settings.llm_timeout_s if role == "super" else settings.small_llm_timeout_s,
             "num_retries": 3,
         }
         if effort:

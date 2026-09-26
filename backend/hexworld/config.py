@@ -32,7 +32,8 @@ class Settings(BaseSettings):
     tile_reasoning: str = "minimal"
     artist_model: str = ""  # material/sprite designers; "" = tile_model
     artist_reasoning: str = "low"
-    llm_timeout_s: float = 120.0
+    llm_timeout_s: float = 120.0  # super agent (the planner writes thousands of tokens)
+    small_llm_timeout_s: float = 25.0  # tile agents + artists: short calls (p99 ~10s); a stalled call retries fast
     fake_reject_rate: float = 0.15  # FakeClient: fraction of first attempts the fake super rejects
 
     # ---- images
