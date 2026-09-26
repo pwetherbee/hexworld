@@ -6,7 +6,8 @@
 This document is the north star for where HexWorld is going: an infinitely drillable, agent-built
 world that is also a **game**: slick, legible, and genuinely fun. It covers the idea, the design
 pillars, the architecture it implies, and the roadmap. The research behind the game-design choices
-lives in [`research/game-design-research.md`](research/game-design-research.md).
+lives in [`research/game-design-research.md`](research/game-design-research.md). The detailed game
+specs (templates, the content pipeline, play mode, world life) live in [`game/`](game/README.md).
 
 ---
 
