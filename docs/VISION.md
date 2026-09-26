@@ -170,9 +170,12 @@ map and attributes. The research doc details the families. The first ones:
   from dice tables alone.
 
 ### 5.3 Agents at play time
-- **Game designer** (the super, at plan time): picks a template and writes the rules as **data**
-  (a game spec: turn structure, actions, resources, win conditions, the tile attributes each rule
-  reads). It never writes free-form code.
+- **World bible** (the super, first): factions, a compact history whose evidence is scattered across
+  tiles, an affinity chart, a Compendium roster with habitats, a progression spine and a key graph.
+  Everything downstream is validated against it.
+- **Game designer** (the super, at plan time): infers the target aesthetics from the prompt, picks a
+  template and writes the rules as **data** (a game spec: turn structure, actions, resources, win
+  conditions, the tile attributes each rule reads). It never writes free-form code.
 - **Rules engine** (deterministic): validates and resolves every action. LLMs never adjudicate
   rules, so the game stays fair, replayable and cheap.
 - **Playtester agents**: simulated players (search- or LLM-driven) play the generated rules before a
@@ -201,10 +204,17 @@ map and attributes. The research doc details the families. The first ones:
    new relief ops. Improves every map now.
 2. **Layers:** geometry and data model, drill runs (seed layout, ancestor and sibling context,
    parent-fit review), and the drill UI (dive transition, level of detail, breadcrumbs).
-3. **Game spec + rules engine:** templates, the game designer step, deterministic resolution,
-   visibility/fog of war, and a first **Adventure** mode (avatar, movement costs, discovery, drilling
-   as entering places).
-4. **Playtesting agents + balance metrics**, then **Board game** and **Tactics** modes.
+3. **Adventure v0:**
+   - a world bible, validated for a solvable key graph and every Compendium entry being obtainable;
+   - tile roles and encounter tables, and fog of war;
+   - an avatar with hop movement, and tiny deterministic encounters using the affinity chart;
+   - drilling as entering places, with results written back to the parent tile;
+   - a bot that walks the spine to check it can be completed.
+
+   (See the research doc's "first playable milestone".)
+4. **Game spec + rules engine + playtesting agents** (staged: random playouts, MCTS self-play,
+   restricted play, skill ladder, LLM critics), then the **Board** templates (Expedition and Hold the
+   Line first) and **Tactics** inside drilled dungeons.
 5. **Live agents:** game master and NPCs, quests and encounters generated from the lore.
 6. **Polish and sharing:** onboarding, juice, sound, save and share, spectating.
 
