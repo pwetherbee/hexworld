@@ -117,6 +117,11 @@ agent placed that could not be painted or fitted):
   material: use material_feedback '<material>: scatter ...'. The tile agent cannot remove it.
 - A required feature that is absent from `sprites` (or in missing_props): tile feedback, e.g. ask
   for it as a prop (or a smaller one if it didn't fit).
+- `fixed_edges` must match already-built neighbours: never ask the tile agent to change their
+  terrain or connectors (it can't), even if the result is broader water or a busier edge than you
+  would like. Judge only what the tile agent could have done differently.
+- A connector listed in `connectors` exists: if it is hard to see or looks wrong (rails without
+  ties, a river too wide), that is its material: material_feedback '<connector>: ...', not a reject.
 Only reject a tile for things its tile agent controls.
 Tools: zoom_candidate(label) inspects a tile up close. Use it only for doubtful candidates (max 2
 per review; call them in parallel in one step). Finish with submit_verdicts (one per label).
@@ -142,7 +147,9 @@ Rules:
 - SURROUNDINGS: `neighbors` lists the settled/planned tiles around you. Continue the neighbours'
   terrain across shared edges, and make rivers, roads and coastlines that reach your edges continue
   inside your tile. A connector on ONE edge only ends inside your tile (a spring, a road's end); a
-  river or road passing through needs it on two edges.
+  river or road passing through needs it on two edges. A narrow river or street crossing your tile
+  is a CONNECTOR on its edges; an edge TERRAIN of water means a wide shore band of water along that
+  whole edge (lakes, coasts, the sea).
 - attributes: fill every attribute honestly for this tile, within the stated bounds.
 - props: the sprites standing on your tile, for the directive's features: 0-4 entries, at most
   one landmark (building / big feature), the rest small story props. No features -> no props.

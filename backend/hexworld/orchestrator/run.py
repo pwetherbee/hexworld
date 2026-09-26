@@ -117,6 +117,7 @@ class Candidate:
     flat_png: bytes = b""
     layers: list[TileLayer] = field(default_factory=list)
     material_versions: dict[str, int] = field(default_factory=dict)
+    fixed_edges: dict[int, EdgeSpec] = field(default_factory=dict)  # facing settled neighbours
 
 
 class RunExecutor:
@@ -1714,6 +1715,7 @@ class RunExecutor:
                         flat_png,
                         layers,
                         used_versions,
+                        facing,
                     )
                 t.status = TileStatus.reviewing
                 t.preview_asset_id = asset_id
@@ -1732,6 +1734,7 @@ class RunExecutor:
                     flat_png,
                     layers,
                     used_versions,
+                    facing,
                 )
         except BudgetExceeded as e:
             self._budget_error = e
@@ -1796,6 +1799,14 @@ class RunExecutor:
                     {self._canonical_kind(p.kind) for p in c.design.props}
                     - {layer.label for layer in c.layers if layer.kind == "sprite"}
                 ),
+                # continuity: these edges must match already-built neighbours, the tile agent
+                # cannot change them (their terrain/connectors are fixed)
+                "fixed_edges": {
+                    DIRECTION_NAMES[i]: e.terrain + (f" + {', '.join(e.connectors)}" if e.connectors else "")
+                    for i, e in sorted(c.fixed_edges.items())
+                },
+                # connectors on this tile: how each LOOKS is its material's (route to material_feedback)
+                "connectors": sorted({cn for e in c.design.edges for cn in e.connectors}),
                 "metrics": {
                     "seam_delta": c.checks.metrics.get("seam_delta", {}),
                     "distinct_colors": c.checks.metrics.get("distinct_colors"),
