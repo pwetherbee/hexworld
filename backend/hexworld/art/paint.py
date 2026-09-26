@@ -119,3 +119,124 @@ class OpenAISpritePainter:
             if not details:
                 usage["text_input_tokens"] = usage["input_tokens"]
         return base64.b64decode(b64), usage
+
+
+# ----------------------------------------------------------------------------- sprite sheets
+
+QUADRANTS = ["top-left", "top-right", "bottom-left", "bottom-right"]
+
+
+def sheet_frame(style: Any, subjects: list[str]) -> str:
+    keywords = getattr(style, "style_keywords", "") if style else ""
+    cells = "; ".join(
+        f"cell {i + 1} ({QUADRANTS[i]}): {s}" if s else f"cell {i + 1} ({QUADRANTS[i]}): leave empty"
+        for i, s in enumerate(subjects + [""] * (4 - len(subjects)))
+    )
+    return (
+        "A 2x2 sprite sheet of separate Terraria-style 16-bit pixel art game sprites, side view, each "
+        "designed to read at 32x32 pixels: bold simple chunky silhouettes made of a few large shapes, "
+        "thick dark outlines, flat vibrant colours with 3-tone shading lit from the top-left, strong "
+        "value contrast, big visible pixels, no thin spikes or fine detail, no anti-aliasing. "
+        f"{keywords}. Exactly one isolated object centred in each used quadrant, fully inside it with wide "
+        f"empty margins, nothing crossing the centre lines. {cells}. Transparent background, no grid "
+        "lines, no ground, no drop shadows, no glow halo, no text."
+    )
+
+
+def split_sheet(png: bytes, n: int) -> list[bytes | None]:
+    """Quadrant PNGs for the first `n` cells; None for a cell that is empty or spills over a centre
+    line (its object would be cut: that sprite is repainted on its own)."""
+    img = Image.open(io.BytesIO(png)).convert("RGBA")
+    a = np.asarray(img)
+    H, W = a.shape[:2]
+    h2, w2 = H // 2, W // 2
+    solid = a[..., 3] >= 128
+    out: list[bytes | None] = []
+    for i in range(n):
+        y0, x0 = (i // 2) * h2, (i % 2) * w2
+        cell = solid[y0 : y0 + h2, x0 : x0 + w2]
+        inner_x = slice(w2 - 6, w2) if i % 2 == 0 else slice(0, 6)  # strip along the vertical centre line
+        inner_y = slice(h2 - 6, h2) if i // 2 == 0 else slice(0, 6)  # strip along the horizontal one
+        spill = int(cell[:, inner_x].sum()) + int(cell[inner_y, :].sum())
+        if cell.mean() < 0.005 or spill > 40:
+            out.append(None)
+            continue
+        buf = io.BytesIO()
+        img.crop((x0, y0, x0 + w2, y0 + h2)).save(buf, format="PNG")
+        out.append(buf.getvalue())
+    return out
+
+
+class SheetPainter:
+    """Batches concurrent paint requests into 2x2 sprite sheets: one image call paints up to four
+    sprites, in the same time and for the same price as one. Requests with the same style that
+    arrive within `window_s` share a sheet; a lone request is painted on its own; a sheet cell that
+    comes back empty or spilling out of its quadrant is repainted individually."""
+
+    def __init__(self, painter: OpenAISpritePainter, window_s: float = 1.0, per_sheet: int = 4):
+        self.painter = painter
+        self.model = painter.model
+        self.window_s = window_s
+        self.per_sheet = per_sheet
+        self._queues: dict[str, list[tuple[str, Any, asyncio.Future]]] = {}
+        self._timers: dict[str, asyncio.TimerHandle] = {}
+        self._tasks: set[asyncio.Task] = set()
+
+    async def paint(self, prompt: str) -> tuple[bytes, dict[str, int]]:
+        return await self.painter.paint(prompt)
+
+    async def paint_subject(self, subject: str, style: Any) -> tuple[bytes, dict[str, int]]:
+        loop = asyncio.get_running_loop()
+        key = getattr(style, "style_keywords", "") if style else ""
+        fut: asyncio.Future = loop.create_future()
+        q = self._queues.setdefault(key, [])
+        q.append((subject, style, fut))
+        if len(q) >= self.per_sheet:
+            self._flush(key)
+        elif key not in self._timers:
+            self._timers[key] = loop.call_later(self.window_s, self._flush, key)
+        return await fut
+
+    def _flush(self, key: str) -> None:
+        timer = self._timers.pop(key, None)
+        if timer is not None:
+            timer.cancel()
+        q = self._queues.get(key, [])
+        batch, self._queues[key] = q[: self.per_sheet], q[self.per_sheet :]
+        if self._queues[key]:
+            self._timers[key] = asyncio.get_running_loop().call_later(self.window_s, self._flush, key)
+        if batch:
+            task = asyncio.ensure_future(self._paint_batch(batch))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+
+    async def _paint_batch(self, batch: list[tuple[str, Any, asyncio.Future]]) -> None:
+        try:
+            if len(batch) == 1:
+                subject, style, fut = batch[0]
+                await self._single(subject, style, fut)
+                return
+            style = batch[0][1]
+            png, usage = await self.painter.paint(sheet_frame(style, [b[0] for b in batch]))
+            share = {k: v // len(batch) for k, v in usage.items()}
+            cells = split_sheet(png, len(batch))
+            for (subject, st, fut), cell in zip(batch, cells, strict=True):
+                if cell is None:
+                    await self._single(subject, st, fut, extra=share)
+                elif not fut.done():
+                    fut.set_result((cell, {**share, "sheet": len(batch)}))
+        except Exception as e:  # noqa: BLE001 - every waiting artist gets the error
+            for *_, fut in batch:
+                if not fut.done():
+                    fut.set_exception(e)
+
+    async def _single(self, subject: str, style: Any, fut: asyncio.Future, extra: dict | None = None) -> None:
+        try:
+            png, usage = await self.painter.paint(style_frame(style, subject))
+            if extra:
+                usage = {k: usage.get(k, 0) + extra.get(k, 0) for k in set(usage) | set(extra)}
+            if not fut.done():
+                fut.set_result((png, usage))
+        except Exception as e:  # noqa: BLE001
+            if not fut.done():
+                fut.set_exception(e)

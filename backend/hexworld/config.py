@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     sprite_image_model: str = "gpt-image-2.5-flare"  # "" = sprites drawn with the DSL instead
     sprite_image_quality: str = "low"
     paint_concurrency: int = 6  # simultaneous image-model paintings
+    sprite_sheets: bool = True  # batch concurrent paintings into 2x2 sheets (1/4 of the image cost)
     prefetch_sprites: bool = True  # start painting the plan's features as soon as it is committed
     gen_px: int = 1024  # generation resolution before pixelization
 

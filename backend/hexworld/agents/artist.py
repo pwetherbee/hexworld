@@ -152,7 +152,10 @@ class SpriteArtist:
             if self.renders >= MAX_RENDERS:
                 return {"error": "paint budget used (3): submit the best version with submit_sprite"}
             self.renders += 1
-            png, usage = await self.painter.paint(style_frame(self.world.style, subject))
+            if hasattr(self.painter, "paint_subject"):  # batches into sprite sheets
+                png, usage = await self.painter.paint_subject(subject, self.world.style)
+            else:
+                png, usage = await self.painter.paint(style_frame(self.world.style, subject))
             cost = estimate_image_cost(self.painter.model, usage)
             kit.budget.charge_image(cost)
             kit.tracer.emit(

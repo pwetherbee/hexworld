@@ -154,3 +154,53 @@ def test_image_cost_uses_image_model_prices():
 
     usage = {"text_input_tokens": 200, "image_input_tokens": 0, "output_tokens": 1000}
     assert abs(estimate_image_cost("gpt-image-2.5-flare", usage) - (200 * 5 + 1000 * 30) / 1e6) < 1e-12
+
+
+def _sheet(cells: list[tuple[int, int, int, int] | None], spill: bool = False) -> bytes:
+    a = np.zeros((1024, 1024, 4), np.uint8)
+    for i, box in enumerate(cells):
+        if box is None:
+            continue
+        y0, x0 = (i // 2) * 512, (i % 2) * 512
+        top, left, bottom, right = box
+        a[y0 + top : y0 + bottom, x0 + left : x0 + right] = (200, 80, 40, 255)
+    if spill:
+        a[100:300, 480:540] = (10, 200, 10, 255)  # an object crossing the vertical centre line
+    buf = io.BytesIO()
+    Image.fromarray(a, "RGBA").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_sprite_sheet_splits_into_quadrants_and_flags_bad_cells():
+    from hexworld.art.paint import split_sheet
+
+    ok = split_sheet(_sheet([(100, 100, 400, 400)] * 4), 4)
+    assert all(c is not None for c in ok)
+    assert pixelize_sprite(ok[3], "medium").h == 24 + 2
+    cells = split_sheet(_sheet([(100, 100, 400, 400), None, (100, 100, 400, 400)], spill=True), 3)
+    assert cells[0] is None and cells[1] is None and cells[2] is not None  # spilled, empty, fine
+
+
+async def test_sheet_painter_batches_concurrent_requests():
+    import asyncio
+
+    from hexworld.art.paint import SheetPainter
+
+    class Fake:
+        model = "gpt-image-2.5-flare"
+        calls: list[str] = []
+
+        async def paint(self, prompt: str):
+            self.calls.append(prompt)
+            await asyncio.sleep(0.01)
+            if prompt.startswith("A 2x2 sprite sheet"):
+                return _sheet([(100, 100, 400, 400)] * 3), {"output_tokens": 300}
+            return _sheet([(100, 100, 400, 400)]), {"output_tokens": 200}
+
+    fake = Fake()
+    sp = SheetPainter(fake, window_s=0.05)  # type: ignore[arg-type]
+    results = await asyncio.gather(*[sp.paint_subject(s, None) for s in ("barn", "pumpkin", "tree")])
+    assert len(fake.calls) == 1 and all(png for png, _ in results)
+    assert all(u["output_tokens"] == 100 and u["sheet"] == 3 for _, u in results)
+    alone = await sp.paint_subject("windmill", None)
+    assert len(fake.calls) == 2 and "Subject: windmill" in fake.calls[1] and alone[1]["output_tokens"] == 200
