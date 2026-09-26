@@ -190,6 +190,7 @@ class RunExecutor:
                     else:
                         self._reset_inflight()
                     await self._grow(root)
+                    await self._drain_background()
                 finally:
                     await self._stop_growth()
             self._finish(RunStatus.completed)
@@ -1158,8 +1159,13 @@ class RunExecutor:
         self._review_sem = asyncio.Semaphore(2)
         self._reviewer = asyncio.create_task(self._review_loop(root))
 
+    async def _drain_background(self) -> None:
+        """Let in-flight library work (artist revisions, repaints) land before the run completes."""
+        while self._bg:
+            await asyncio.gather(*list(self._bg), return_exceptions=True)
+
     async def _stop_growth(self) -> None:
-        tasks = [self._reviewer, *[t for t in self._early.values() if not t.done()]]
+        tasks = [self._reviewer, *[t for t in self._early.values() if not t.done()], *self._bg]
         for task in tasks:
             task.cancel()
         for task in tasks:
@@ -1781,13 +1787,18 @@ class RunExecutor:
                     key = kind_key(name) if note else ""
                     target = key if key in kinds else (kinds[0] if kinds else None)
                     if target:
-                        await self._revise_sprite(
-                            target, (note if key == target else v.sprite_feedback).strip(), sp
+                        # artist revisions update tiles when done: never hold up this batch's verdicts
+                        self._background(
+                            self._revise_sprite(
+                                target, (note if key == target else v.sprite_feedback).strip(), self._root
+                            )
                         )
                 if v.material_feedback:
                     name, _, note = v.material_feedback.partition(":")
                     name = name.strip() if note and name.strip() in self.world.materials else c.design.biome
-                    await self._revise_material(name, (note or v.material_feedback).strip(), sp)
+                    self._background(
+                        self._revise_material(name, (note or v.material_feedback).strip(), self._root)
+                    )
                 self.tracer.emit(
                     "review.verdict",
                     span_id=sp.id,

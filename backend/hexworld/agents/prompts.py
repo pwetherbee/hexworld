@@ -124,7 +124,8 @@ Rules:
   neighbors, transition plausibly toward their biome. Respect the directive's edge_hints.
 - SURROUNDINGS: `neighbors` lists the settled/planned tiles around you. Continue the neighbours'
   terrain across shared edges, and make rivers, roads and coastlines that reach your edges continue
-  inside your tile.
+  inside your tile. A connector on ONE edge only ends inside your tile (a spring, a road's end); a
+  river or road passing through needs it on two edges.
 - attributes: fill every attribute honestly for this tile, within the stated bounds.
 - props: the sprites standing on your tile, for the directive's features: 0-4 entries, at most
   one landmark (building / big feature), the rest small story props. No features -> no props.

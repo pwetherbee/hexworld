@@ -385,8 +385,8 @@ def render_ground(
             for t in np.linspace(0, 1, 32):
                 off = amp * 1.6 * math.sin(math.pi * t) * (1 - t)  # zero offset & slope at the edge
                 dist = np.minimum(dist, np.hypot(bx - (mx * t + nx * off), by - (my * t + ny * off)))
-        if len(mine) == 1:
-            dist = np.minimum(dist, np.hypot(bx, by) - width)
+        if len(mine) == 1:  # a dead end (spring, road end): a small bulb, not a pond
+            dist = np.minimum(dist, np.hypot(bx, by) - width * 0.3)
         mat = np.where(dist <= width, idx, mat)
 
     specs = [spec_of(n) for n in names]
