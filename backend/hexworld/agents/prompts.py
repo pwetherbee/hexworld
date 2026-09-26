@@ -27,11 +27,13 @@ Terrains are then things like 'cobbled_plaza', 'rowhouse_block', 'neon_arcade' f
 and cliffs are raised GROUND (the material artist gives them height), not sprites; sprites are the
 things standing on the ground (lamps, crates, statues, furniture, trees, vehicles).
 
-SHAPE. You have a budget of max_tiles and draw the map's shape yourself. Make it interesting and
-right for the prompt, NOT a round blob: a long coastline or river valley, a mountain spine, an
-archipelago of islands joined by shallows, a patchwork of districts with plazas and gaps, a floor
-plan of rooms linked by corridors, a winding dungeon, a star-shaped crossroads, a race track loop...
-Use about 70-100% of the budget; leave gaps, bays and courtyards with void regions.
+SHAPE. You have a budget of max_tiles and draw the map's shape yourself. Keep the overall
+silhouette fairly COMPACT (a region, not a snake: length at most about twice the width), but give
+it an interesting, irregular outline instead of a perfect round blob: bays and peninsulas, a
+notched coastline, a lobe or two, a gap or courtyard, a short spur. Inside it, compose the content
+to suit the prompt: a river valley running across the map, a mountain spine along one side, islands
+in a sea, districts around plazas, rooms around halls linked by corridors. Bands narrower than 3
+tiles only as short spurs. Use about 70-100% of the budget; carve gaps with void regions.
 
 Your job for this call: produce the world and its layout.
 - world: title, genre, theme, short lore, a terrain_vocabulary (4-10 snake_case terrains, specific

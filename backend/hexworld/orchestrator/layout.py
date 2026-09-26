@@ -40,6 +40,26 @@ class Rasterized:
     skipped_occupied: int = 0
     notes: list[str] = field(default_factory=list)
 
+    @property
+    def compactness(self) -> float:
+        return compactness([Hex(t.q, t.r) for t in self.tiles])
+
+
+COMPACT_ENOUGH = 0.3  # below this a plan reads as a snake/ribbon rather than a region
+
+
+def compactness(hexes: list[Hex]) -> float:
+    """How much of its enclosing hexagon a shape fills: tiles / area of the smallest hexagon,
+    centred on the tile nearest the shape's centroid, that contains every tile. A solid hexagon is
+    1.0, a blob with a ragged coast ~0.6-0.8, a 2:1 region ~0.45, a long one-tile ribbon ~0.05."""
+    if len(hexes) < 7:
+        return 1.0
+    pts = [h.to_pixel(1.0) for h in hexes]
+    cx, cy = sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)
+    centre = min(hexes, key=lambda h: (h.to_pixel(1.0)[0] - cx) ** 2 + (h.to_pixel(1.0)[1] - cy) ** 2)
+    R = max(h.distance(centre) for h in hexes)
+    return len(hexes) / (3 * R * (R + 1) + 1)
+
 
 def _hash(q: int, r: int, salt: float) -> float:
     v = math.sin(q * 127.1 + r * 311.7 + salt * 74.7) * 43758.5453

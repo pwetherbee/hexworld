@@ -17,6 +17,7 @@ from hexworld.agents import prompts
 from hexworld.agents.kit import AgentKit, coerce, image_part, submitted, text_part
 from hexworld.domain import Layout, Verdict, WaveReview, World, WorldHeader, WorldPlan
 from hexworld.hex import Hex
+from hexworld.orchestrator.layout import COMPACT_ENOUGH
 from hexworld.telemetry import Span
 
 
@@ -105,6 +106,14 @@ async def plan_world(
         if not any(r.mode == "add" for r in layout.regions):
             return {"error": "the layout needs at least one region with mode 'add'"}
         res = rasterize(layout, header)
+        if res.compactness < COMPACT_ENOUGH and not state.get("warned_compact"):
+            state["warned_compact"] = True  # a nudge, not a rule: the next submission is accepted
+            return {
+                "error": f"the map is very stretched (compactness {res.compactness:.2f}; a solid hexagon is 1.0, "
+                f"aim for {COMPACT_ENOUGH + 0.15:.2f}+): keep an interesting outline but make the overall "
+                "silhouette more compact: widen long bands to 3+ tiles, cluster the regions around the "
+                "origin, keep length at most about twice the width (thin strands only as short spurs)"
+            }
         if res.dropped_over_cap > max(6, max_tiles // 2):
             return {
                 "error": f"your shapes cover {len(res.tiles) + res.dropped_over_cap} tiles but the budget is "

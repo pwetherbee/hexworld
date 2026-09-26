@@ -346,3 +346,32 @@ async def test_islands_grow_in_parallel(make_runtime):
     far_first = next(e for e in jobs if Hex(e.q, e.r).distance(Hex(6, 0)) <= 1)
     home_last = [e for e in jobs if Hex(e.q, e.r).distance(Hex(0, 0)) <= 1][-1]
     assert far_first.id < home_last.id  # the far island did not wait for the home island to finish
+
+
+class SnakePlanner(FakeClient):
+    """Submits a long one-tile ribbon; after the compactness nudge, submits it again unchanged."""
+
+    def act(self, payload, called, last_response, followups, tools):
+        if payload.get("task") == "world_plan" and "submit_world" in called:
+            biome = self._world_plan(payload, _rng_for_tests())["world"]["terrain_vocabulary"][1]
+            ribbon = {"kind": "path", "points": [{"q": 0, "r": 0}, {"q": 18, "r": 0}], "width": 1}
+            return "submit_layout", {
+                "layout": {
+                    "regions": [{"name": "snake", "biome": biome, "intent": "ribbon", "shapes": [ribbon]}]
+                }
+            }
+        return super().act(payload, called, last_response, followups, tools)
+
+
+async def test_stretched_layouts_get_one_compactness_nudge(make_runtime):
+    rt = make_runtime(llm=SnakePlanner(latency_s=0, reject_rate=0))
+    world, run = await _run(rt, radius=3)
+    assert run.status == RunStatus.completed, run.error
+    results = [
+        e.data
+        for e in rt.store.list_events(run_id=run.id)
+        if e.type == "agent.tool_result" and (e.data or {}).get("tool") == "submit_layout"
+    ]
+    assert len(results) == 2
+    assert "compactness" in str(results[0]["response"]) and "submitted" in str(results[1]["response"])
+    assert run.stats.tiles_planned == 19  # the nudge is advice: the second submission is built as drawn
