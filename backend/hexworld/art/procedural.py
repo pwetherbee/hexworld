@@ -210,6 +210,53 @@ def grid_points(ctx: Ctx, cell: float, density: float, seed: float, jitter: floa
 TONES = list(RAMP_FACTORS)
 
 
+def _lots(ctx: Ctx, scale: float, seed: float):
+    """Building lots on a staggered grid (like city blocks), with 2px alleys on their north and
+    west sides. -> (inside mask, lot hash, second lot hash); evaluated on 2px art cells."""
+    sx, sy = max(6.0, scale), max(6.0, round(scale * 0.75))
+    row = np.floor(ctx.bcy / sy)
+    x = ctx.bcx + (row % 2) * sx * 0.5
+    col = np.floor(x / sx)
+    lx, ly = x - col * sx, ctx.bcy - row * sy
+    inside = (lx > 2.0) & (ly > 2.0)
+    return inside, _hash(col, row, seed), _hash(col, row, seed + 2.3)
+
+
+def _lot_south(ctx: Ctx, scale: float) -> np.ndarray:
+    """The southern half of each lot (a roof's shaded slope)."""
+    sy = max(6.0, round(scale * 0.75))
+    ly = ctx.bcy - np.floor(ctx.bcy / sy) * sy
+    return ly > 2.0 + (sy - 2.0) / 2
+
+
+def _walls(ctx: Ctx, scale: float, doors: float, seed: float) -> np.ndarray:
+    """Wall lines of a room grid (2px thick) with a doorway in a share `doors` of wall segments."""
+    s = max(8.0, scale)
+    col, row = np.floor(ctx.bcx / s), np.floor(ctx.bcy / s)
+    lx, ly = ctx.bcx - col * s, ctx.bcy - row * s
+    vwall, hwall = lx < 2.0, ly < 2.0
+    mid = s / 2
+    vdoor = (_hash(col, row, seed + 1.1) < doors) & (np.abs(ly - mid) < 3.0)
+    hdoor = (_hash(col, row, seed + 4.7) < doors) & (np.abs(lx - mid) < 3.0)
+    return (vwall & ~vdoor) | (hwall & ~hdoor)
+
+
+def _tiling(ctx: Ctx, kind: str, scale: float) -> np.ndarray:
+    """Pixel-level floor/wall tilings: checker tiles, plank seams, brick mortar."""
+    px, py = np.floor(ctx.wx), np.floor(ctx.wy)
+    s = max(2.0, scale)
+    if kind == "checker":
+        return (np.floor(px / s) + np.floor(py / s)) % 2 == 0
+    if kind == "planks":
+        bh = max(2.0, round(s / 4))
+        row = np.floor(py / bh)
+        ends = (px + np.floor(_hash(row, 0, 3.3) * s)) % s == 0
+        return (py % bh == 0) | ends
+    rh = max(2.0, round(s / 3))  # bricks
+    row = np.floor(py / rh)
+    return (py % rh == 0) | ((px + (row % 2) * np.floor(s / 2)) % s == 0)
+
+
 def _bands(ctx: Ctx, angle: float, period: float, seed: float) -> np.ndarray:
     """Meandering bands (dunes, strata, ridgelines): a sine across `angle`, domain-warped by
     low-frequency noise so the bands wander instead of ruling straight lines."""
@@ -258,6 +305,22 @@ def paint_material(img: np.ndarray, m: np.ndarray, ctx: Ctx, spec: MaterialSpec,
             k = op.scale * (0.55 - 0.3 * op.amount)
             img[m & (dx + dy < -k)] = R["light"]
             img[m & (dx + dy > k * 1.1)] = R["dark"]
+        elif op.op == "lots":  # built: rooftops / stalls on a staggered lot grid
+            inside, lid, lid2 = _lots(ctx, op.scale, seed)
+            sel = m & inside & (lid < op.amount)
+            south = _lot_south(ctx, op.scale)
+            if op.tone == "accent":
+                img[sel] = color
+            else:
+                t0 = TONES.index(op.tone)
+                for k, shift in enumerate((-1, 0, 1)):
+                    tone = TONES[min(len(TONES) - 1, max(0, t0 + shift))]
+                    img[sel & (np.floor(lid2 * 3) == k)] = R[tone]
+            img[sel & south] = img[sel & south] * 0.84  # roof ridge: the south slope is in shade
+        elif op.op == "rooms":
+            img[m & _walls(ctx, op.scale, op.amount, seed)] = color
+        elif op.op in ("checker", "planks", "bricks"):
+            img[m & _tiling(ctx, op.op, op.scale)] = color
         elif op.op == "decals" and op.pixels:
             C = ctx.C
             for col, row in grid_points(ctx, op.scale, op.amount, seed):
@@ -309,6 +372,13 @@ def material_heights(ctx: Ctx, spec: MaterialSpec, name: str) -> np.ndarray:
             sel = voronoi(ctx.bcx, ctx.bcy, scale, seed)[2] < op.amount
         elif op.op == "stripes":
             sel = _bands(ctx, 30.0, scale, seed) > 1 - 2 * op.amount * 0.5
+        elif op.op == "lots":  # buildings: lots rise, some a level taller than the rest
+            inside, lid, lid2 = _lots(ctx, op.scale, seed)
+            sel = inside & (lid < op.amount)
+            h = np.where(sel, h + op.delta + (lid2 < 0.35) * np.sign(op.delta), h)
+            continue
+        elif op.op == "rooms":  # interior walls
+            sel = _walls(ctx, op.scale, op.amount, seed)
         else:  # speckle, per block
             sel = _hash(np.floor(ctx.bcx), np.floor(ctx.bcy), seed) < op.amount * 0.4
         h = np.where(sel, h + op.delta, h)
@@ -348,7 +418,8 @@ def render_ground(
     # straight bisectors. Evaluated in world space, so neighbours agree near shared edges.
     wx_ = value_noise(ctx.bcx, ctx.bcy, U * 1.6, 3.1) - 0.5
     wy_ = value_noise(ctx.bcx, ctx.bcy, U * 1.6, 5.3) - 0.5
-    bx, by = ctx.bcx - cx + wx_ * U * 1.2, ctx.bcy - cy + wy_ * U * 1.2
+    bx0, by0 = ctx.bcx - cx, ctx.bcy - cy  # unwarped (for straight, built connectors)
+    bx, by = bx0 + wx_ * U * 1.2, by0 + wy_ * U * 1.2
     dots = np.stack(
         [
             (bx * math.cos(math.radians(a)) + by * math.sin(math.radians(a))) / apothem
@@ -374,19 +445,24 @@ def render_ground(
     for cname in sorted({cn for _, cn in conns}):
         idx = len(names)
         names.append(cname)
-        width = U * (0.75 if spec_of(cname).liquid else 0.55)
+        cspec = spec_of(cname)
+        straight = cspec.edges == "straight"
+        px_, py_ = (bx0, by0) if straight else (bx, by)
+        width = U * (0.75 if cspec.liquid else 0.55)
         dist = np.full(bx.shape, 1e9)
         mine = [i for i, cn in conns if cn == cname]
         for i in mine:
             ang = math.radians(DIRECTION_ANGLES[i])
             mx, my = math.cos(ang) * apothem, math.sin(ang) * apothem
             nx, ny = -math.sin(ang), math.cos(ang)
-            amp = U * 0.9 * (1 if (coord[0] * 7 + coord[1] * 13 + i) % 2 else -1)
+            amp = 0.0 if straight else U * 0.9 * (1 if (coord[0] * 7 + coord[1] * 13 + i) % 2 else -1)
             for t in np.linspace(0, 1, 32):
                 off = amp * 1.6 * math.sin(math.pi * t) * (1 - t)  # zero offset & slope at the edge
-                dist = np.minimum(dist, np.hypot(bx - (mx * t + nx * off), by - (my * t + ny * off)))
+                dist = np.minimum(dist, np.hypot(px_ - (mx * t + nx * off), py_ - (my * t + ny * off)))
         if len(mine) == 1:  # a dead end (spring, road end): a small bulb, not a pond
-            dist = np.minimum(dist, np.hypot(bx, by) - width * 0.3)
+            dist = np.minimum(dist, np.hypot(px_, py_) - width * 0.3)
+        elif straight and len(mine) > 2:  # a junction: a small square
+            dist = np.minimum(dist, np.maximum(np.abs(px_), np.abs(py_)) - width * 0.6)
         mat = np.where(dist <= width, idx, mat)
 
     specs = [spec_of(n) for n in names]

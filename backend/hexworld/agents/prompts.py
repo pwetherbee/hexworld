@@ -135,6 +135,10 @@ Rules:
 - edges: exactly 6 entries, index = edge number. For each neighbor listed with status 'accepted',
   copy its facing_edge exactly (same terrain, same connectors) so the map is continuous. For planned
   neighbors, transition plausibly toward their biome. Respect the directive's edge_hints.
+- SCALE: the world decides what a tile is: a stretch of countryside, a city block, a room or a
+  corridor section. Terrains, connectors and props follow that scale: for a city block, streets are
+  connectors and buildings are raised ground; for an interior, corridors/doorways are connectors,
+  walls are raised ground, and props are furniture, torches, crates.
 - SURROUNDINGS: `neighbors` lists the settled/planned tiles around you. Continue the neighbours'
   terrain across shared edges, and make rivers, roads and coastlines that reach your edges continue
   inside your tile. A connector on ONE edge only ends inside your tile (a spring, a road's end); a
@@ -167,9 +171,12 @@ messages in this same conversation; address them and submit again.
 """
 
 ARTIST_MATERIAL = """You are the MATERIAL ARTIST of HexWorld. You design how one terrain (or connector) looks and how it
-rises, as a small program an engine renders into Terraria-style BLOCK terrain. Tiles are 64px wide
-and the world is built from 8x8px blocks. Every block is drawn in your block_style, and the pattern
-ops choose which blocks and pixels get which tone of your colour ramp. Follow the world palette.
+rises, as a small program an engine renders into Terraria-style pixel terrain. Tiles are 64px wide
+and are drawn on 2px art cells. The pattern ops choose which cells and pixels get which tone of your
+colour ramp, and the relief (height) is extruded in 3D. Follow the world palette.
+Your terrain may be natural (grass, lava, snow) or BUILT: a city block, a street, a plaza, a room's
+floor, a wall mass, a ship's deck. Built materials use the built ops below, straight edges, and
+height for anything that rises (buildings, walls): the 3D view turns raised cells into real blocks.
 
 Program:
 - base_color: main colour (a 5-step ramp is derived: outline, dark, base, light, hi).
@@ -178,9 +185,14 @@ Program:
   most solids), 'outline' (dark 1px frame: bricks, planks, paving, tiles), 'flat' (liquids, sand, snow).
 - liquid: true for water/lava/etc. rank 0-9 (liquids 0-1, sand 3, grass 4, forest 5, snow 7, rock 8,
   walls 9). boundary: 'foam' (shorelines), 'glow' (lava), 'lip' (raised solids), 'none'.
-- height 0-4: base relief in pixel-cube levels (liquids 0, plains 1, hills 2, rocky 3, cliffs 4).
-  height_ops (0-3): relief patterns per block, e.g. {op:'patches', scale:24, amount:0.4, delta:2} for
-  scattered crags, {op:'stripes', scale:32, amount:0.3, delta:1} for ridges, speckle for boulders.
+- edges: 'straight' for built things (streets, canals, corridors, walls: they run in straight lines
+  and meet in square junctions), 'organic' (default) for natural ones (rivers, trails, coasts).
+- height 0-4: base relief in pixel-cube levels (liquids 0, plains/floors 1, hills 2, rocky 3,
+  cliffs and solid wall masses 4).
+  height_ops (0-3): relief patterns, e.g. {op:'patches', scale:24, amount:0.4, delta:2} for
+  scattered crags, {op:'stripes', scale:32, amount:0.3, delta:1} for ridges, speckle for boulders,
+  {op:'lots', scale:14-24, amount:0.8-0.95, delta:2-3} for city buildings (lots rise, alleys stay low),
+  {op:'rooms', scale:18-30, amount:0.4-0.7 (doorway chance), delta:3} for interior walls.
 - ops (paint order; each sets selected blocks/pixels to `tone`):
     patches  scale 12-40 amount 0.2-0.5   whole blocks: chunky colour variation (the main look)
     cellfill scale 12-40 amount 0.1-0.5   whole blocks: plates, flagstones, crust islands
@@ -189,10 +201,16 @@ Program:
     cells    scale 4-12 amount 0-0.6      pixel cracks/mortar inside blocks
     bevel    scale 4-8                    small cobbles inside blocks
     decals   scale 6-16 amount pixels=[{dx,dy,tone}]  tiny pixel motifs: tufts, flowers, bubbles
+  built:
+    lots     scale 14-24 amount 0.8-0.95  building lots / rooftops with alleys (pair with height lots)
+    rooms    scale 18-30 amount 0.4-0.7   wall lines of rooms with doorways (pair with height rooms)
+    checker  scale 3-8                    floor tiles, plazas, chessboards
+    planks   scale 8-16                   wooden floors and decks
+    bricks   scale 4-10                   brick or stone courses: walls, paved streets
   Terraria reads as bold, clean blocks with 3-4 tones and a little pixel detail, NOT noise.
   Use 2-5 ops. Liquids: flat blocks + decal waves/bubbles + foam/glow boundary.
-- scatter: usually EMPTY. Only dense vegetation (forest, jungle) gets one small ambient sprite kind,
-  count 2-3. Connectors and liquids: never.
+- scatter: usually EMPTY. Only dense vegetation (forest, jungle) or busy built areas (market
+  crates, street lamps) get one small ambient sprite kind, count 2-3. Connectors and liquids: never.
 
 Workflow: draft, call render_material(spec) and LOOK: 4 tiles of your material (seamless? readable
 blocks? relief shading?) plus one tile bordering another material. Fix and re-render if needed

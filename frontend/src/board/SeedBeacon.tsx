@@ -47,7 +47,9 @@ export function SeedBeacon() {
   const run = useStore((s) => (s.activeRunId ? s.runs[s.activeRunId] : undefined));
   const promptTarget = useStore((s) => s.promptTarget);
   const target = useMemo(() => {
-    if (run) return { q: run.origin.q, r: run.origin.r, radius: run.options?.radius ?? 3, armed: false };
+    // the survey reach of a tile budget (the super picks the actual shape)
+    const tiles = run?.options?.max_tiles ?? 40;
+    if (run) return { q: run.origin.q, r: run.origin.r, radius: Math.sqrt(tiles / 3), armed: false };
     if (promptTarget) return { ...promptTarget, radius: 0, armed: true };
     return null;
   }, [run, promptTarget]);
@@ -65,7 +67,7 @@ export function SeedBeacon() {
   useEffect(() => {
     if (!runId || !run) return;
     const [x, z] = hexToWorld(run.origin.q, run.origin.r);
-    rig.setGoal(new THREE.Vector3(x, 0, z), 10 + (run.options?.radius ?? 3) * 2.4);
+    rig.setGoal(new THREE.Vector3(x, 0, z), 10 + Math.sqrt((run.options?.max_tiles ?? 40) / 3) * 2.4);
   }, [runId]); // eslint-disable-line react-hooks/exhaustive-deps
   const originTile = useStore((s) => (key ? s.tiles[key] : undefined));
   const biome = originTile?.biome ?? originTile?.directive?.biome ?? null;

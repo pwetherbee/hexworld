@@ -204,3 +204,69 @@ async def test_sheet_painter_batches_concurrent_requests():
     assert all(u["output_tokens"] == 100 and u["sheet"] == 3 for _, u in results)
     alone = await sp.paint_subject("windmill", None)
     assert len(fake.calls) == 2 and "Subject: windmill" in fake.calls[1] and alone[1]["output_tokens"] == 200
+
+
+def _mat(ops, hops=(), height=1, **kw):
+    from hexworld.domain.art import MaterialSpec
+
+    return MaterialSpec(
+        base_color="#8a6a50",
+        accent_color="#ffcc66",
+        base_tone="base",
+        liquid=False,
+        rank=5,
+        boundary="lip",
+        block_style="bevel",
+        height=height,
+        height_ops=list(hops),
+        ops=list(ops),
+        scatter=[],
+        **kw,
+    )
+
+
+def _pop(kind, scale, amount=0.5, tone="dark"):
+    from hexworld.domain.art import PatternOp
+
+    return PatternOp(op=kind, tone=tone, scale=scale, amount=amount, angle=0, pixels=[])
+
+
+def test_built_ops_raise_buildings_and_walls():
+    from hexworld.art.relief import split_levels
+
+    city = _mat([_pop("lots", 18, 0.9, "base")], [HeightOp(op="lots", scale=18, amount=0.9, delta=2)])
+    _, h = render_ground(
+        tile_px=P,
+        biome="block",
+        edges=[{"terrain": "block", "connectors": []}] * 6,
+        coord=(0, 0),
+        materials={"block": city},
+    )
+    lv = split_levels(h)[0][TileCanvas(Hex(0, 0), P).mask()]
+    assert (lv == 1).mean() > 0.15 and (lv >= 3).mean() > 0.4  # alleys low, buildings up
+    hall = _mat(
+        [_pop("planks", 12), _pop("rooms", 24, 0.6, "outline")],
+        [HeightOp(op="rooms", scale=24, amount=0.6, delta=3)],
+    )
+    _, h = render_ground(
+        tile_px=P,
+        biome="hall",
+        edges=[{"terrain": "hall", "connectors": []}] * 6,
+        coord=(0, 0),
+        materials={"hall": hall},
+    )
+    lv = split_levels(h)[0][TileCanvas(Hex(0, 0), P).mask()]
+    assert 0.08 < (lv == 4).mean() < 0.4  # thin walls, mostly floor
+
+
+def test_straight_connectors_run_straight():
+    ground = _mat([])
+    street = _mat([], edges="straight").model_copy(update={"base_color": "#202020"})
+    edges = [{"terrain": "g", "connectors": ["street"] if i in (0, 3) else []} for i in range(6)]
+    rgb, _ = render_ground(
+        tile_px=P, biome="g", edges=edges, coord=(2, -1), materials={"g": ground, "street": street}
+    )
+    c = TileCanvas(Hex(2, -1), P)
+    dark = (rgb.max(-1) < 60) & c.mask()
+    rows = np.nonzero(dark.any(1))[0]
+    assert dark.any() and rows.max() - rows.min() <= 12  # a straight E-W band, not a meander

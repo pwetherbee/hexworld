@@ -89,18 +89,38 @@ class PatternOp(BaseModel):
     speckle:  random single pixels, density = amount      cells:   voronoi cracks/mortar, width ~ amount
     cellfill: fill a fraction (amount) of voronoi cells    bevel:   per-cell light/dark bevel (stones)
     decals:   stamp `pixels` on a jittered grid (cell = scale, density = amount)
+    built environments (cities, interiors):
+    lots:     rectangular building lots on a staggered grid with 2px alleys, lot size = scale,
+              share of lots filled = amount (each lot varies its shade: rooftops, market stalls)
+    rooms:    wall lines of a room grid (room size = scale) with doorways (door chance = amount)
+    checker:  checkerboard floor tiles (tile size = scale)
+    planks:   wooden floorboards (board length = scale), dark seams
+    bricks:   brick/stone courses (brick length = scale), mortar lines
     """
 
-    op: Literal["patches", "speckle", "stripes", "cells", "cellfill", "bevel", "decals"]
+    op: Literal[
+        "patches",
+        "speckle",
+        "stripes",
+        "cells",
+        "cellfill",
+        "bevel",
+        "decals",
+        "lots",
+        "rooms",
+        "checker",
+        "planks",
+        "bricks",
+    ]
     tone: Literal["outline", "dark", "base", "light", "hi", "accent"]
-    scale: float = Field(description="Feature size in pixels (2-16).")
+    scale: float = Field(description="Feature size in pixels (2-16; lots/rooms 10-40).")
     amount: float = Field(description="0-1 coverage/density/width, per op.")
     angle: float = Field(description="Degrees, for stripes.")
     pixels: list[DecalPixel] = Field(description="Decal pattern (for 'decals'); [] otherwise.")
 
     @model_validator(mode="after")
     def _c(self) -> PatternOp:
-        self.scale = _clamp(self.scale, 2, 16)
+        self.scale = _clamp(self.scale, 2, 48)
         self.amount = _clamp(self.amount, 0, 1)
         self.pixels = [p for p in self.pixels if abs(p.dx) <= 3 and abs(p.dy) <= 3][:12]
         return self
@@ -108,9 +128,10 @@ class PatternOp(BaseModel):
 
 class HeightOp(BaseModel):
     """Relief pattern, evaluated per BLOCK in world space: selected blocks are raised/lowered by
-    `delta` levels (one level = one pixel-cube high)."""
+    `delta` levels (one level = one pixel-cube high). 'lots' raises building lots (city blocks, with
+    varied heights); 'rooms' raises the walls of a room grid (interiors), leaving doorways."""
 
-    op: Literal["patches", "cellfill", "stripes", "speckle"]
+    op: Literal["patches", "cellfill", "stripes", "speckle", "lots", "rooms"]
     scale: float = Field(description="Feature size in pixels (8-48 for block-scale relief).")
     amount: float = Field(description="0-1 coverage/density.")
     delta: int = Field(description="-2..+4 levels added to selected blocks.")
@@ -148,6 +169,11 @@ class MaterialSpec(BaseModel):
         default="bevel",
         description="How each 8px block is drawn: 'bevel' (lit top-left, shaded bottom-right; stone, dirt, "
         "grass, obsidian), 'outline' (dark 1px frame: bricks, planks, tiles), 'flat' (liquids, snow, sand).",
+    )
+    edges: Literal["organic", "straight"] = Field(
+        default="organic",
+        description="'straight' for built things: streets, canals, corridors and walls run in straight "
+        "lines between tile edges; 'organic' (rivers, trails, coasts) meanders.",
     )
     height: int = Field(
         default=1, description="Base relief level 0-4 (liquids 0, plains 1, hills 2, rock 3+)."

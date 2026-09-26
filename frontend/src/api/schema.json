@@ -648,6 +648,7 @@
           "type": "integer"
         },
         "leave_empty": {
+          "default": false,
           "description": "True to deliberately leave this slot empty.",
           "type": "boolean"
         },
@@ -674,7 +675,8 @@
           "type": "array"
         },
         "priority": {
-          "description": "1 (low) .. 5 (high); higher is generated earlier within its wave.",
+          "default": 3,
+          "description": "1 (low) .. 5 (high); higher is generated earlier.",
           "type": "integer"
         },
         "duplicate": {
@@ -804,12 +806,26 @@
     },
     "RunOptions": {
       "properties": {
-        "radius": {
-          "default": 5,
-          "description": "How far from the clicked tile the super may expand.",
-          "maximum": 8,
+        "max_tiles": {
+          "default": 40,
+          "description": "Upper bound on tiles the super may plan (it picks the shape).",
+          "maximum": 250,
           "minimum": 1,
           "type": "integer"
+        },
+        "radius": {
+          "anyOf": [
+            {
+              "maximum": 9,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Deprecated: a hexagon of this radius' worth of tiles."
         },
         "max_attempts": {
           "default": 3,
@@ -842,6 +858,7 @@
       "title": "RunOptions",
       "type": "object",
       "required": [
+        "max_tiles",
         "radius",
         "max_attempts",
         "review_batch",

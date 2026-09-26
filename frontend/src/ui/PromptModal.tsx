@@ -2,10 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store";
 
 const EXAMPLES = [
-  "A temperate kingdom with rolling hills, a winding river and a castle",
   "A pirate archipelago with hidden coves and a volcano",
-  "A frozen tundra race to the glacier",
-  "Shifting dunes around an oasis city",
+  "A long river valley winding from glacier to delta",
+  "A dense neon megacity block with markets and alleys",
+  "The inside of a dwarven fortress: forges, halls and mines",
 ];
 
 export function PromptModal() {
@@ -13,7 +13,7 @@ export function PromptModal() {
   const world = useStore((s) => s.world);
   const [shown, setShown] = useState(target);
   const [prompt, setPrompt] = useState("");
-  const [radius, setRadius] = useState(5);
+  const [maxTiles, setMaxTiles] = useState(40);
   const [maxAttempts, setMaxAttempts] = useState(3);
   const [maxCost, setMaxCost] = useState(2);
   const [busy, setBusy] = useState(false);
@@ -40,7 +40,7 @@ export function PromptModal() {
     setBusy(true);
     setErr(null);
     try {
-      await useStore.getState().startRun(prompt, { radius, max_attempts: maxAttempts, max_cost_usd: maxCost });
+      await useStore.getState().startRun(prompt, { max_tiles: maxTiles, max_attempts: maxAttempts, max_cost_usd: maxCost });
       setPrompt("");
     } catch (e) {
       setErr((e as Error).message);
@@ -78,13 +78,16 @@ export function PromptModal() {
         <details className="prompt-options">
           <summary>
             <span className="mono muted">
-              ({shown.q}, {shown.r}) · radius {radius} · {maxAttempts} tries · ${maxCost.toFixed(2)} cap
+              ({shown.q}, {shown.r}) · up to {maxTiles} tiles · {maxAttempts} tries · ${maxCost.toFixed(2)} cap
             </span>
           </summary>
           <div className="options">
             <label>
-              Radius <b>{radius}</b>
-              <input type="range" min={1} max={8} value={radius} onChange={(e) => setRadius(+e.target.value)} />
+              Max tiles <b>{maxTiles}</b>
+              <input
+                type="range" min={5} max={200} step={5} value={maxTiles}
+                onChange={(e) => setMaxTiles(+e.target.value)}
+              />
             </label>
             <label>
               Attempts <b>{maxAttempts}</b>

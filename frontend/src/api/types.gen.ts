@@ -505,9 +505,13 @@ export interface Run {
  */
 export interface RunOptions {
   /**
-   * How far from the clicked tile the super may expand.
+   * Upper bound on tiles the super may plan (it picks the shape).
    */
-  radius: number;
+  max_tiles: number;
+  /**
+   * Deprecated: a hexagon of this radius' worth of tiles.
+   */
+  radius: number | null;
   max_attempts: number;
   review_batch: number;
   max_llm_calls: number;
@@ -573,7 +577,7 @@ export interface PlannedTile {
    */
   edge_hints: EdgeHint[];
   /**
-   * 1 (low) .. 5 (high); higher is generated earlier within its wave.
+   * 1 (low) .. 5 (high); higher is generated earlier.
    */
   priority: number;
   duplicate: CopySpec1;
