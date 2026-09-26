@@ -6,7 +6,15 @@ import { useStore } from "../store";
 import { type FormingUniforms, makeFormingMaterial, tilePalette } from "./forming";
 import { SHARED, hexOutlinePoints, tileFaceGeometry } from "./geometry";
 import { DIRECTIONS, Spring, hexDistance, hexKey, hexToWorld } from "./hexMath";
-import { LEVEL_STEP, levelAt, reliefGeometry, reliefShader, reliefShaderKey, useLevels } from "./relief";
+import {
+  LEVEL_STEP,
+  SURFACE_CELLS,
+  levelAt,
+  reliefGeometry,
+  reliefShader,
+  reliefShaderKey,
+  useLevels,
+} from "./relief";
 import { usePixelTexture } from "./textures";
 
 const FLASH_MS = 900;
@@ -175,6 +183,9 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
         ringMat.current.opacity = 0.9 * (1 - rk) * (1 - rk);
       }
     }
+
+    U.uCells.value = P + 3;
+    if (accepted && texW) SURFACE_CELLS.value = texW; // all tiles of a world share one resolution
 
     // --- palette (eases when the material artist delivers the real ramp)
     const k = paletteSnapped.current ? 1 - Math.exp(-3 * dt) : 1;

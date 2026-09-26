@@ -375,3 +375,24 @@ async def test_stretched_layouts_get_one_compactness_nudge(make_runtime):
     assert len(results) == 2
     assert "compactness" in str(results[0]["response"]) and "submitted" in str(results[1]["response"])
     assert run.stats.tiles_planned == 19  # the nudge is advice: the second submission is built as drawn
+
+
+async def test_tile_resolution_is_a_world_setting_and_sprites_keep_their_size(make_runtime):
+    import io as _io
+
+    from PIL import Image
+
+    widths = {}
+    for px in (64, 128):
+        rt = make_runtime(llm=FakeClient(latency_s=0, reject_rate=0, duplicate_rate=0))
+        world = rt.create_world()
+        run = await rt.start_run(world.id, 0, 0, "A temperate kingdom", RunOptions(radius=1, tile_px=px))
+        run = await rt.wait(run.id)
+        assert run.status == RunStatus.completed, run.error
+        w = rt.store.get_world(world.id)
+        assert w.style.tile_px == px
+        tiles = [t for t in rt.store.list_tiles(world.id) if t.status == TileStatus.accepted]
+        ground = next(la for la in tiles[0].layers if la.kind == "ground")
+        assert Image.open(_io.BytesIO(rt.store.get_asset(ground.asset_id))).size == (px + 3, px + 3)
+        widths[px] = sorted(round(la.width, 3) for t in tiles for la in t.layers if la.kind == "sprite")
+    assert widths[64] == widths[128]  # the same props, the same size on the map

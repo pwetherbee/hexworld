@@ -43,7 +43,7 @@ Your job for this call: produce the world and its layout.
   Terraria-like pixel art: chunky crisp pixels, bold dark outlines on props, vibrant saturated colours,
   4-5 step shading ramps lit from the top-left, no dithering, no anti-aliasing.
   palette = 24-48 '#rrggbb' colours: a ramp for every terrain + prop colours (wood, stone, roof,
-  fire, outline). tile_px: 64 (fixed). view: 'top-down block terrain, props as side-view sprites'.
+  fire, outline). tile_px: any (the engine sets the resolution). view: 'top-down block terrain, props as side-view sprites'.
 - tile_attributes: 0-6 gameplay attributes that THIS game actually uses, derived from the prompt's
   mechanics (a card race needs e.g. space_type/card_deck; a tactics game cover/move_cost; an
   adventure encounter/loot/danger). Do not add generic attributes like elevation or passable unless

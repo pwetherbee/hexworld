@@ -93,7 +93,7 @@ export interface StyleGuide {
    */
   palette: string[];
   /**
-   * Canonical tile resolution in pixels (square canvas, hex inscribed). 32, 48 or 64.
+   * Tile ground resolution in pixels (set by the engine from the run options).
    */
   tile_px: number;
   /**
@@ -171,6 +171,10 @@ export interface MaterialSpec {
    */
   block_style: "bevel" | "outline" | "flat";
   /**
+   * 'straight' for built things: streets, canals, corridors and walls run in straight lines between tile edges; 'organic' (rivers, trails, coasts) meanders.
+   */
+  edges: "organic" | "straight";
+  /**
    * Base relief level 0-4 (liquids 0, plains 1, hills 2, rock 3+).
    */
   height: number;
@@ -189,13 +193,14 @@ export interface MaterialSpec {
 }
 /**
  * Relief pattern, evaluated per BLOCK in world space: selected blocks are raised/lowered by
- * `delta` levels (one level = one pixel-cube high).
+ * `delta` levels (one level = one pixel-cube high). 'lots' raises building lots (city blocks, with
+ * varied heights); 'rooms' raises the walls of a room grid (interiors), leaving doorways.
  *
  * This interface was referenced by `ApiSchemas`'s JSON-Schema
  * via the `definition` "HeightOp".
  */
 export interface HeightOp {
-  op: "patches" | "cellfill" | "stripes" | "speckle";
+  op: "patches" | "cellfill" | "stripes" | "speckle" | "lots" | "rooms";
   /**
    * Feature size in pixels (8-48 for block-scale relief).
    */
@@ -216,15 +221,34 @@ export interface HeightOp {
  * speckle:  random single pixels, density = amount      cells:   voronoi cracks/mortar, width ~ amount
  * cellfill: fill a fraction (amount) of voronoi cells    bevel:   per-cell light/dark bevel (stones)
  * decals:   stamp `pixels` on a jittered grid (cell = scale, density = amount)
+ * built environments (cities, interiors):
+ * lots:     rectangular building lots on a staggered grid with 2px alleys, lot size = scale,
+ *           share of lots filled = amount (each lot varies its shade: rooftops, market stalls)
+ * rooms:    wall lines of a room grid (room size = scale) with doorways (door chance = amount)
+ * checker:  checkerboard floor tiles (tile size = scale)
+ * planks:   wooden floorboards (board length = scale), dark seams
+ * bricks:   brick/stone courses (brick length = scale), mortar lines
  *
  * This interface was referenced by `ApiSchemas`'s JSON-Schema
  * via the `definition` "PatternOp".
  */
 export interface PatternOp {
-  op: "patches" | "speckle" | "stripes" | "cells" | "cellfill" | "bevel" | "decals";
+  op:
+    | "patches"
+    | "speckle"
+    | "stripes"
+    | "cells"
+    | "cellfill"
+    | "bevel"
+    | "decals"
+    | "lots"
+    | "rooms"
+    | "checker"
+    | "planks"
+    | "bricks";
   tone: "outline" | "dark" | "base" | "light" | "hi" | "accent";
   /**
-   * Feature size in pixels (2-16).
+   * Feature size in pixels (2-16; lots/rooms 10-40).
    */
   scale: number;
   /**
@@ -512,6 +536,10 @@ export interface RunOptions {
    * Deprecated: a hexagon of this radius' worth of tiles.
    */
   radius: number | null;
+  /**
+   * Ground texture resolution per tile (32-128px). Only for a new world: all tiles of a world share one pixel grid, so extensions keep the world's resolution.
+   */
+  tile_px: number | null;
   max_attempts: number;
   review_batch: number;
   max_llm_calls: number;

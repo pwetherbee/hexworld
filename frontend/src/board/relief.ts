@@ -297,6 +297,8 @@ export function reliefGeometry(q: number, r: number, heightId: string, lv: Level
 
 /** Shared clock for animated surfaces (advanced once per frame by the board). */
 export const SURFACE_TIME = { value: 0 };
+/** Texels per tile canvas (tile_px + 3) of the open world, for texel-snapped surface effects. */
+export const SURFACE_CELLS = { value: 67 };
 
 /**
  * Relief material hook: liquid top faces get a slow, pixel-quantized shimmer (bands of +/- one
@@ -304,16 +306,17 @@ export const SURFACE_TIME = { value: 0 };
  */
 export function reliefShader(shader: THREE.WebGLProgramParametersWithUniforms): void {
   shader.uniforms.uTime = SURFACE_TIME;
+  shader.uniforms.uCells = SURFACE_CELLS;
   shader.vertexShader = shader.vertexShader
     .replace("#include <common>", "#include <common>\nattribute float liquid;\nvarying float vLiquid;")
     .replace("#include <uv_vertex>", "#include <uv_vertex>\nvLiquid = liquid;");
   shader.fragmentShader = shader.fragmentShader
-    .replace("#include <common>", "#include <common>\nuniform float uTime;\nvarying float vLiquid;")
+    .replace("#include <common>", "#include <common>\nuniform float uTime;\nuniform float uCells;\nvarying float vLiquid;")
     .replace(
       "#include <map_fragment>",
       `#include <map_fragment>
       if (vLiquid > 0.5) {
-        vec2 cell = floor(vMapUv * 67.0);
+        vec2 cell = floor(vMapUv * uCells);
         float band = sin(cell.x * 0.45 + cell.y * 0.8 - uTime * 1.8)
                    + 0.6 * sin(cell.x * 1.3 - cell.y * 0.35 + uTime * 1.1);
         diffuseColor.rgb *= 1.0 + 0.11 * step(1.2, band) - 0.05 * step(band, -1.25);

@@ -156,6 +156,7 @@ def voronoi(wx: np.ndarray, wy: np.ndarray, cell: float, seed: float):
 class Ctx:
     C: int
     B: int
+    k: float  # tile resolution / 64: pattern sizes scale with it, the pixel grain does not
     wx: np.ndarray  # pixel-centre world coords
     wy: np.ndarray
     bcx: np.ndarray  # world coords of the centre of each pixel's block
@@ -176,6 +177,7 @@ def _ctx(canvas: TileCanvas, margin: int = 0) -> Ctx:
     px, py = np.floor(wx), np.floor(wy)  # integer world pixel indices
     bx, by = np.floor(px / B), np.floor(py / B)
     return Ctx(
+        k=canvas.P / 64,
         C=C,
         B=B,
         wx=wx,
@@ -284,31 +286,32 @@ def paint_material(img: np.ndarray, m: np.ndarray, ctx: Ctx, spec: MaterialSpec,
         img[m & (g > 0.93)] = up
     for i, op in enumerate(spec.ops):
         seed = _seed(name, i)
+        sc = op.scale * ctx.k
         color = R[op.tone]
         if op.op == "patches":  # block-level: whole blocks change colour (chunky)
-            n = value_noise(ctx.bcx, ctx.bcy, max(op.scale, ctx.B * 1.5), seed)
+            n = value_noise(ctx.bcx, ctx.bcy, max(sc, ctx.B * 1.5), seed)
             img[m & (n > 1 - op.amount * 0.8)] = color
         elif op.op == "cellfill":
-            _, _, cid, _, _ = voronoi(ctx.bcx, ctx.bcy, max(op.scale, ctx.B * 1.5), seed)
+            _, _, cid, _, _ = voronoi(ctx.bcx, ctx.bcy, max(sc, ctx.B * 1.5), seed)
             img[m & (cid < op.amount)] = color
         elif op.op == "stripes":
-            v = _bands(ctx, op.angle, max(op.scale, ctx.B * 2), seed)
+            v = _bands(ctx, op.angle, max(sc, ctx.B * 2), seed)
             img[m & (v > 1 - 2 * op.amount * 0.5)] = color
         elif op.op == "speckle":  # pixel-level detail
             h = _hash(np.floor(ctx.wx), np.floor(ctx.wy), seed)
             img[m & (h < op.amount * 0.35)] = color
         elif op.op == "cells":  # pixel-level cracks
-            d1, d2, *_ = voronoi(ctx.wx, ctx.wy, op.scale, seed)
+            d1, d2, *_ = voronoi(ctx.wx, ctx.wy, sc, seed)
             img[m & (d2 - d1 < 0.4 + op.amount * 1.2)] = color
         elif op.op == "bevel":  # per-voronoi-stone bevel (cobbles inside blocks)
-            _, _, _, dx, dy = voronoi(ctx.wx, ctx.wy, op.scale, seed)
-            k = op.scale * (0.55 - 0.3 * op.amount)
+            _, _, _, dx, dy = voronoi(ctx.wx, ctx.wy, sc, seed)
+            k = sc * (0.55 - 0.3 * op.amount)
             img[m & (dx + dy < -k)] = R["light"]
             img[m & (dx + dy > k * 1.1)] = R["dark"]
         elif op.op == "lots":  # built: rooftops / stalls on a staggered lot grid
-            inside, lid, lid2 = _lots(ctx, op.scale, seed)
+            inside, lid, lid2 = _lots(ctx, sc, seed)
             sel = m & inside & (lid < op.amount)
-            south = _lot_south(ctx, op.scale)
+            south = _lot_south(ctx, sc)
             if op.tone == "accent":
                 img[sel] = color
             else:
@@ -318,12 +321,12 @@ def paint_material(img: np.ndarray, m: np.ndarray, ctx: Ctx, spec: MaterialSpec,
                     img[sel & (np.floor(lid2 * 3) == k)] = R[tone]
             img[sel & south] = img[sel & south] * 0.84  # roof ridge: the south slope is in shade
         elif op.op == "rooms":
-            img[m & _walls(ctx, op.scale, op.amount, seed)] = color
+            img[m & _walls(ctx, sc, op.amount, seed)] = color
         elif op.op in ("checker", "planks", "bricks"):
-            img[m & _tiling(ctx, op.op, op.scale)] = color
+            img[m & _tiling(ctx, op.op, sc)] = color
         elif op.op == "decals" and op.pixels:
             C = ctx.C
-            for col, row in grid_points(ctx, op.scale, op.amount, seed):
+            for col, row in grid_points(ctx, sc, op.amount, seed):
                 if not m[min(C - 1, max(0, row)), min(C - 1, max(0, col))]:
                     continue
                 for px in op.pixels:
@@ -365,7 +368,8 @@ def material_heights(ctx: Ctx, spec: MaterialSpec, name: str) -> np.ndarray:
     h = np.full(ctx.wx.shape, float(spec.height))
     for i, op in enumerate(spec.height_ops):
         seed = _seed(name, 100 + i)
-        scale = max(op.scale, ctx.B * 2)
+        sc = op.scale * ctx.k
+        scale = max(sc, ctx.B * 2)
         if op.op == "patches":
             sel = value_noise(ctx.bcx, ctx.bcy, scale, seed) > 1 - op.amount * 0.8
         elif op.op == "cellfill":
@@ -373,12 +377,12 @@ def material_heights(ctx: Ctx, spec: MaterialSpec, name: str) -> np.ndarray:
         elif op.op == "stripes":
             sel = _bands(ctx, 30.0, scale, seed) > 1 - 2 * op.amount * 0.5
         elif op.op == "lots":  # buildings: lots rise, some a level taller than the rest
-            inside, lid, lid2 = _lots(ctx, op.scale, seed)
+            inside, lid, lid2 = _lots(ctx, sc, seed)
             sel = inside & (lid < op.amount)
             h = np.where(sel, h + op.delta + (lid2 < 0.35) * np.sign(op.delta), h)
             continue
         elif op.op == "rooms":  # interior walls
-            sel = _walls(ctx, op.scale, op.amount, seed)
+            sel = _walls(ctx, sc, op.amount, seed)
         else:  # speckle, per block
             sel = _hash(np.floor(ctx.bcx), np.floor(ctx.bcy), seed) < op.amount * 0.4
         h = np.where(sel, h + op.delta, h)
@@ -531,7 +535,7 @@ def material_preview_png(
         rgb, levels = render_ground(
             tile_px=tile_px, biome=name, edges=edges, coord=(h.q, h.r), materials=mats
         )
-        rgb = relief_shade(rgb, levels)
+        rgb = relief_shade(rgb, levels, level_px=max(1, round(2 * tile_px / 64)))
         canvas = TileCanvas(h, tile_px)
         rgba = np.zeros((canvas.C, canvas.C, 4), np.uint8)
         m = canvas.mask()

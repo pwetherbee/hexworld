@@ -461,14 +461,16 @@
       "type": "object"
     },
     "HeightOp": {
-      "description": "Relief pattern, evaluated per BLOCK in world space: selected blocks are raised/lowered by\n`delta` levels (one level = one pixel-cube high).",
+      "description": "Relief pattern, evaluated per BLOCK in world space: selected blocks are raised/lowered by\n`delta` levels (one level = one pixel-cube high). 'lots' raises building lots (city blocks, with\nvaried heights); 'rooms' raises the walls of a room grid (interiors), leaving doorways.",
       "properties": {
         "op": {
           "enum": [
             "patches",
             "cellfill",
             "stripes",
-            "speckle"
+            "speckle",
+            "lots",
+            "rooms"
           ],
           "type": "string"
         },
@@ -539,6 +541,15 @@
           ],
           "type": "string"
         },
+        "edges": {
+          "default": "organic",
+          "description": "'straight' for built things: streets, canals, corridors and walls run in straight lines between tile edges; 'organic' (rivers, trails, coasts) meanders.",
+          "enum": [
+            "organic",
+            "straight"
+          ],
+          "type": "string"
+        },
         "height": {
           "default": 1,
           "description": "Base relief level 0-4 (liquids 0, plains 1, hills 2, rock 3+).",
@@ -574,6 +585,7 @@
         "rank",
         "boundary",
         "block_style",
+        "edges",
         "height",
         "height_ops",
         "ops",
@@ -583,7 +595,7 @@
       "type": "object"
     },
     "PatternOp": {
-      "description": "One layer of a material, evaluated in world pixel coordinates (seamless across tiles).\n\npatches:  smooth noise blobs, coverage = amount       stripes: waves at `angle`, period = scale\nspeckle:  random single pixels, density = amount      cells:   voronoi cracks/mortar, width ~ amount\ncellfill: fill a fraction (amount) of voronoi cells    bevel:   per-cell light/dark bevel (stones)\ndecals:   stamp `pixels` on a jittered grid (cell = scale, density = amount)",
+      "description": "One layer of a material, evaluated in world pixel coordinates (seamless across tiles).\n\npatches:  smooth noise blobs, coverage = amount       stripes: waves at `angle`, period = scale\nspeckle:  random single pixels, density = amount      cells:   voronoi cracks/mortar, width ~ amount\ncellfill: fill a fraction (amount) of voronoi cells    bevel:   per-cell light/dark bevel (stones)\ndecals:   stamp `pixels` on a jittered grid (cell = scale, density = amount)\nbuilt environments (cities, interiors):\nlots:     rectangular building lots on a staggered grid with 2px alleys, lot size = scale,\n          share of lots filled = amount (each lot varies its shade: rooftops, market stalls)\nrooms:    wall lines of a room grid (room size = scale) with doorways (door chance = amount)\nchecker:  checkerboard floor tiles (tile size = scale)\nplanks:   wooden floorboards (board length = scale), dark seams\nbricks:   brick/stone courses (brick length = scale), mortar lines",
       "properties": {
         "op": {
           "enum": [
@@ -593,7 +605,12 @@
             "cells",
             "cellfill",
             "bevel",
-            "decals"
+            "decals",
+            "lots",
+            "rooms",
+            "checker",
+            "planks",
+            "bricks"
           ],
           "type": "string"
         },
@@ -609,7 +626,7 @@
           "type": "string"
         },
         "scale": {
-          "description": "Feature size in pixels (2-16).",
+          "description": "Feature size in pixels (2-16; lots/rooms 10-40).",
           "type": "number"
         },
         "amount": {
@@ -827,6 +844,18 @@
           "default": null,
           "description": "Deprecated: a hexagon of this radius' worth of tiles."
         },
+        "tile_px": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ground texture resolution per tile (32-128px). Only for a new world: all tiles of a world share one pixel grid, so extensions keep the world's resolution."
+        },
         "max_attempts": {
           "default": 3,
           "maximum": 6,
@@ -860,6 +889,7 @@
       "required": [
         "max_tiles",
         "radius",
+        "tile_px",
         "max_attempts",
         "review_batch",
         "max_llm_calls",
@@ -1253,7 +1283,7 @@
           "type": "array"
         },
         "tile_px": {
-          "description": "Canonical tile resolution in pixels (square canvas, hex inscribed). 32, 48 or 64.",
+          "description": "Tile ground resolution in pixels (set by the engine from the run options).",
           "type": "integer"
         },
         "view": {

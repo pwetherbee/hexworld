@@ -45,16 +45,16 @@ def load_levels(png: bytes) -> np.ndarray:
     return np.rint(a / LEVEL_SCALE).astype(np.int32)
 
 
-def relief_shade(rgba: np.ndarray, levels: np.ndarray) -> np.ndarray:
+def relief_shade(rgba: np.ndarray, levels: np.ndarray, level_px: int = LEVEL_PX) -> np.ndarray:
     """3/4-view cliffs painted onto a flat ground (RGBA or RGB, same canvas as `levels`)."""
     H, W = levels.shape
     out = rgba.astype(np.float32).copy()
     lv = split_levels(levels)[0]
     wall_at = np.zeros((H, W), np.int32)  # 1-based row inside the wall of the rise above
     wall_rows = np.zeros((H, W), np.int32)
-    for dy in range(1, LEVEL_PX * MAX_LEVEL + 2):
+    for dy in range(1, level_px * MAX_LEVEL + 2):
         above = np.pad(lv, ((dy, 0), (0, 0)), mode="edge")[:H]
-        rows = LEVEL_PX * (above - lv) + 1
+        rows = level_px * (above - lv) + 1
         hit = (above > lv) & (rows >= dy) & (wall_at == 0)
         wall_at[hit] = dy
         wall_rows[hit] = rows[hit]

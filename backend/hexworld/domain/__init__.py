@@ -57,6 +57,9 @@ class Coord(BaseModel):
 # --------------------------------------------------------------------------- style / world
 
 
+TILE_PX_CHOICES = (32, 48, 64, 96, 128)
+
+
 class StyleGuide(BaseModel):
     """Shared visual contract for every tile in a world. Set once, then reused."""
 
@@ -64,7 +67,7 @@ class StyleGuide(BaseModel):
         description="Master palette, 12-32 '#rrggbb' colors. Every tile pixel maps to one."
     )
     tile_px: int = Field(
-        description="Canonical tile resolution in pixels (square canvas, hex inscribed). 32, 48 or 64."
+        description="Tile ground resolution in pixels (set by the engine from the run options)."
     )
     view: str = Field(description="Camera description, e.g. 'top-down orthographic'.")
     light_direction: str = Field(description="e.g. 'from the top-left'.")
@@ -89,7 +92,7 @@ class StyleGuide(BaseModel):
     @classmethod
     def _tile_px(cls, v: int) -> int:
         # Snap to a supported size rather than failing a whole plan on it.
-        return min((32, 48, 64), key=lambda s: abs(s - v))
+        return min(TILE_PX_CHOICES, key=lambda s: abs(s - v))
 
 
 class WorldSpec(BaseModel):
@@ -486,6 +489,11 @@ class RunOptions(BaseModel):
     )
     radius: int | None = Field(
         default=None, ge=0, le=9, description="Deprecated: a hexagon of this radius' worth of tiles."
+    )
+    tile_px: int | None = Field(
+        default=None,
+        description="Ground texture resolution per tile (32-128px). Only for a new world: all tiles of a "
+        "world share one pixel grid, so extensions keep the world's resolution.",
     )
     max_attempts: int = Field(default=3, ge=1, le=6)
     review_batch: int = Field(default=12, ge=1, le=16)

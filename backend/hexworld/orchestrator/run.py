@@ -48,6 +48,7 @@ from hexworld.art.relief import levels_to_png, load_levels, relief_shade
 from hexworld.art.sprites import Placed, SpriteArt, flatten, preview_png, scatter_positions
 from hexworld.domain import (
     NO_COPY,
+    TILE_PX_CHOICES,
     Attempt,
     Coord,
     CopySpec,
@@ -80,6 +81,7 @@ FREE_STATUSES = {TileStatus.empty, TileStatus.intentionally_empty, TileStatus.fa
 ACTIVE_STATUSES = {TileStatus.planned, TileStatus.generating, TileStatus.reviewing}
 
 
+SPRITE_BASE_PX = 64  # sprite pixel sizes are defined at this tile resolution
 MAX_PROPS = 4  # agent-chosen props per tile (at most one of them a landmark)
 MAX_SPRITES = 6  # props + ambient scatter
 
@@ -348,8 +350,9 @@ class RunExecutor:
         w = self.world
         if w.spec is None:
             w.spec, w.style, w.tile_attributes = plan.world, plan.style, plan.tile_attributes
-            # engine resolution (64px tiles, 8px blocks), not an art-direction choice
-            w.style = w.style.model_copy(update={"tile_px": 64})
+            # engine resolution, chosen by the user for a new world (then locked: one pixel grid)
+            px = self.run.options.tile_px or 64
+            w.style = w.style.model_copy(update={"tile_px": min(TILE_PX_CHOICES, key=lambda s: abs(s - px))})
             w.name = plan.world.title or w.name
         else:
             # Extension of an existing world: style + attributes are locked; vocabularies may grow.
@@ -1038,7 +1041,8 @@ class RunExecutor:
             if role == "prop" and art.h >= 30 and not landmark_taken:
                 role, landmark_taken = "landmark", True
             reqs.append(PropRequest(e.kind, x, y, sc, art.w, art.h, role))
-        slots, dropped = layout_props(reqs, P)
+        # sprites are sized against the 64px baseline: resolution changes the ground, not the props
+        slots, dropped = layout_props(reqs, SPRITE_BASE_PX)
         if dropped:
             parent.set(dropped=dropped)
         canvas = TileCanvas(t.hex, P)
@@ -1049,7 +1053,7 @@ class RunExecutor:
         placed: list[Placed] = []
         for sl in sorted(slots, key=lambda sl: sl.y):
             e, art = arts[sl.kind]
-            placed.append(Placed(kind=e.kind, art=art, x=sl.x, y=sl.y, scale=sl.scale))
+            placed.append(Placed(kind=e.kind, art=art, x=sl.x, y=sl.y, scale=sl.scale * P / SPRITE_BASE_PX))
             layers.append(
                 TileLayer(
                     kind="sprite",
@@ -1134,7 +1138,9 @@ class RunExecutor:
     def _shaded(self, ground: np.ndarray, height_id: str | None) -> np.ndarray:
         """2D previews show relief as 3/4-view cliffs (the 3D view extrudes the heightmap instead)."""
         lv = self._levels(height_id)
-        return relief_shade(ground, lv) if lv is not None and lv.shape == ground.shape[:2] else ground
+        if lv is None or lv.shape != ground.shape[:2]:
+            return ground
+        return relief_shade(ground, lv, level_px=max(1, round(2 * (ground.shape[0] - 3) / 64)))
 
     # ================================================================== anchor bootstrap
 

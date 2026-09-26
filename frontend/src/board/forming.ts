@@ -54,6 +54,7 @@ export type FormingUniforms = {
   uHasMap: { value: number };
   uMap: { value: THREE.Texture | null };
   uSeed: { value: number };
+  uCells: { value: number };
   uPal: { value: THREE.Color[] };
 };
 
@@ -66,7 +67,7 @@ void main() {
 `;
 
 const fragment = /* glsl */ `
-uniform float uTime, uState, uAppear, uPulse, uFill, uReveal, uScan, uGlitch, uHasMap, uSeed;
+uniform float uTime, uState, uAppear, uPulse, uFill, uReveal, uScan, uGlitch, uHasMap, uSeed, uCells;
 uniform vec3 uPal[6];
 uniform sampler2D uMap;
 varying vec2 vUv;
@@ -88,8 +89,8 @@ vec3 tone(float r) {
 }
 
 void main() {
-  vec2 cell = floor(vUv * 67.0);
-  vec2 art = floor(vUv * 33.5);  // 2px art cells: the grain of the finished ground
+  vec2 cell = floor(vUv * uCells);
+  vec2 art = floor(vUv * uCells * 0.5);  // 2px art cells: the grain of the finished ground
   float h = h21(cell + uSeed);
   float h2 = h21(cell.yx * 1.37 + uSeed + 3.1);
   float ha = h21(art + uSeed * 0.7);
@@ -112,7 +113,7 @@ void main() {
     // forming: cells fill with flickering paint as the work progresses
     float filled = step(ha, uFill);
     vec3 dark = uPal[0] * 0.55;
-    float grid = step(0.86, fract(vUv.x * 67.0)) + step(0.86, fract(vUv.y * 67.0));
+    float grid = step(0.86, fract(vUv.x * uCells)) + step(0.86, fract(vUv.y * uCells));
     col = mix(dark * (1.0 - 0.25 * min(grid, 1.0)), paint, filled);
     // soft light sweep across the surface
     float s = fract((vUv.x * 0.8 + vUv.y) * 0.6 - uTime * 0.28);
@@ -122,7 +123,7 @@ void main() {
 
     if (uHasMap > 0.5) {
       vec2 uv = vUv;
-      float row = floor(vUv.y * 67.0);
+      float row = floor(vUv.y * uCells);
       float jitter = h21(vec2(row, floor(uTime * 24.0))) - 0.5;
       uv.x += uGlitch * jitter * 0.22 * step(0.55, h21(vec2(row, floor(uTime * 9.0))));
       vec4 tx = texture2D(uMap, uv);
@@ -130,7 +131,7 @@ void main() {
       col = mix(col, tx.rgb, shown);
       // review: a slow diagonal wave of 2px art cells flips one shade toward the tile's own
       // highlight as it passes (with dropout, so it reads as pixels flipping, not a light bar)
-      float diag = (art.x + (33.5 - art.y)) / 67.0;          // 0..1, NW -> SE
+      float diag = (art.x + (uCells * 0.5 - art.y)) / uCells;          // 0..1, NW -> SE
       float wave = fract(diag - uTime * 0.22);
       float inBand = step(wave, 0.09) * step(0.35, h21(art + floor(uTime * 6.0) * 0.61));
       float trail = step(wave, 0.2) * step(0.8, h21(art * 1.7 + floor(uTime * 4.0)));
@@ -157,6 +158,7 @@ export function makeFormingMaterial(seed: number): THREE.ShaderMaterial {
     uHasMap: { value: 0 },
     uMap: { value: null },
     uSeed: { value: seed },
+    uCells: { value: 67 },
     uPal: { value: Array.from({ length: 6 }, () => new THREE.Color()) },
   };
   return new THREE.ShaderMaterial({

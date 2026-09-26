@@ -8,18 +8,24 @@ const EXAMPLES = [
   "The inside of a dwarven fortress: forges, halls and mines",
 ];
 
+const RESOLUTIONS = [32, 48, 64, 96, 128]; // ground texture pixels per tile (backend TILE_PX_CHOICES)
+
 export function PromptModal() {
   const target = useStore((s) => s.promptTarget);
   const world = useStore((s) => s.world);
   const [shown, setShown] = useState(target);
   const [prompt, setPrompt] = useState("");
   const [maxTiles, setMaxTiles] = useState(40);
+  const [resIdx, setResIdx] = useState(2); // index into RESOLUTIONS
+
   const [maxAttempts, setMaxAttempts] = useState(3);
   const [maxCost, setMaxCost] = useState(2);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
   const extending = !!world?.spec;
+  const worldPx = world?.style?.tile_px;
+  const tilePx = extending && worldPx ? worldPx : RESOLUTIONS[resIdx];
 
   // Keep content mounted while the exit animation plays.
   useEffect(() => {
@@ -40,7 +46,7 @@ export function PromptModal() {
     setBusy(true);
     setErr(null);
     try {
-      await useStore.getState().startRun(prompt, { max_tiles: maxTiles, max_attempts: maxAttempts, max_cost_usd: maxCost });
+      await useStore.getState().startRun(prompt, { max_tiles: maxTiles, tile_px: tilePx, max_attempts: maxAttempts, max_cost_usd: maxCost });
       setPrompt("");
     } catch (e) {
       setErr((e as Error).message);
@@ -78,7 +84,7 @@ export function PromptModal() {
         <details className="prompt-options">
           <summary>
             <span className="mono muted">
-              ({shown.q}, {shown.r}) · up to {maxTiles} tiles · {maxAttempts} tries · ${maxCost.toFixed(2)} cap
+              ({shown.q}, {shown.r}) · up to {maxTiles} tiles · {tilePx}px terrain · {maxAttempts} tries · ${maxCost.toFixed(2)} cap
             </span>
           </summary>
           <div className="options">
@@ -87,6 +93,15 @@ export function PromptModal() {
               <input
                 type="range" min={5} max={200} step={5} value={maxTiles}
                 onChange={(e) => setMaxTiles(+e.target.value)}
+              />
+            </label>
+            <label title={extending ? "Set when the world was created: every tile shares one pixel grid" : undefined}>
+              Terrain detail <b>{tilePx}px</b>
+              <input
+                type="range" min={0} max={RESOLUTIONS.length - 1} step={1}
+                value={extending && worldPx ? RESOLUTIONS.indexOf(worldPx) : resIdx}
+                disabled={extending}
+                onChange={(e) => setResIdx(+e.target.value)}
               />
             </label>
             <label>
