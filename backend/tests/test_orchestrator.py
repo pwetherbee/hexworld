@@ -309,3 +309,40 @@ async def test_plan_features_are_commissioned_before_tiles_ask_for_them(make_run
     first_sprite = next((e for e in events if e.type == "library.sprite.started"), None)
     first_layers = next(e for e in events if e.type == "tile.layers.started")
     assert first_sprite is not None and first_sprite.id < first_layers.id
+
+
+class IslandPlanner(FakeClient):
+    """Draws two islands: the origin's and one six tiles east (not touching)."""
+
+    def act(self, payload, called, last_response, followups, tools):
+        if payload.get("task") == "world_plan" and "submit_world" in called:
+            biome = self._world_plan(payload, _rng_for_tests())["world"]["terrain_vocabulary"][1]
+            isle = lambda q, r: {"kind": "hex", "center": {"q": q, "r": r}, "radius": 1}  # noqa: E731
+            return "submit_layout", {
+                "layout": {
+                    "regions": [
+                        {"name": "home", "biome": biome, "intent": "home isle", "shapes": [isle(0, 0)]},
+                        {"name": "far", "biome": biome, "intent": "far isle", "shapes": [isle(6, 0)]},
+                    ]
+                }
+            }
+        return super().act(payload, called, last_response, followups, tools)
+
+
+def _rng_for_tests():
+    import random
+
+    return random.Random(1)
+
+
+async def test_islands_grow_in_parallel(make_runtime):
+    rt = make_runtime(llm=IslandPlanner(latency_s=0.02, reject_rate=0))
+    world, run = await _run(rt, radius=3)
+    assert run.status == RunStatus.completed, run.error
+    tiles = {t.hex: t for t in rt.store.list_tiles(world.id) if t.run_id == run.id}
+    assert len(tiles) == 14 and all(t.status == TileStatus.accepted for t in tiles.values())
+    events = rt.store.list_events(run_id=run.id)
+    jobs = [e for e in events if e.type == "tile.job.started"]
+    far_first = next(e for e in jobs if Hex(e.q, e.r).distance(Hex(6, 0)) <= 1)
+    home_last = [e for e in jobs if Hex(e.q, e.r).distance(Hex(0, 0)) <= 1][-1]
+    assert far_first.id < home_last.id  # the far island did not wait for the home island to finish

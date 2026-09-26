@@ -13,7 +13,7 @@ import random
 from typing import Any
 
 from hexworld.agents.themes import THEMES, palette_for, pick_genre, pick_theme
-from hexworld.hex import Hex
+from hexworld.hex import Hex, within
 
 
 def _rng(*parts: Any) -> random.Random:
@@ -64,7 +64,7 @@ class FakeClient:
             if "submit_world" not in called:
                 header = {k: data[k] for k in ("world", "style", "tile_attributes")}
                 return "submit_world", {"header": {**header, "origin_tile": origin_tile}}
-            return "submit_tiles", {"tiles": data["tiles"]}
+            return "submit_layout", {"layout": _as_layout(data["tiles"], self.duplicate_rate, rng)}
         render = self.RENDER.get(task)
         arg_name = self.SUBMIT[task][1]
         if render and render in tools and render not in called:  # look at the draft once
@@ -122,9 +122,18 @@ class FakeClient:
             }
 
         seed = rng.random() * 1000
-        radius = max((c["ring"] for c in p["candidate_coords"]), default=1) or 1
+        # a hexagon that fits the tile budget, around the origin, skipping built tiles
+        radius = 1
+        while 3 * radius * (radius + 1) + 1 < p.get("max_tiles", 19):
+            radius += 1
+        occupied = {(q, r) for q, r in p.get("occupied_nearby", [])}
+        cands = [
+            {"q": h.q, "r": h.r, "ring": h.distance(origin)}
+            for h in within(origin, radius)
+            if (h.q, h.r) not in occupied or h == origin
+        ]
         tiles = []
-        for c in p["candidate_coords"]:
+        for c in cands:
             h = Hex(c["q"], c["r"])
             n = _noise(h, seed)
             falloff = 0.35 * (h.distance(origin) / radius)
@@ -338,3 +347,36 @@ def _noise(h: Hex, seed: float) -> float:
         + math.sin((x + y) * 0.9 + seed * 0.7) * 0.25
     )
     return v / 1.1
+
+
+def _as_layout(tiles: list[dict[str, Any]], duplicate_rate: float, rng: random.Random) -> dict[str, Any]:
+    """Express a per-tile plan in the layout DSL: one region per biome made of single-tile shapes,
+    voids for empty slots, landmarks for featured tiles; filler biomes may be copy-filled."""
+    by_biome: dict[str, list[dict[str, Any]]] = {}
+    voids, landmarks = [], []
+    for t in tiles:
+        if t["leave_empty"]:
+            voids.append({"kind": "hex", "center": {"q": t["q"], "r": t["r"]}, "radius": 0})
+            continue
+        by_biome.setdefault(t["biome"], []).append(t)
+        if t["features"]:
+            landmarks.append({"q": t["q"], "r": t["r"], "intent": t["intent"], "features": t["features"]})
+    regions = []
+    for i, (biome, ts) in enumerate(sorted(by_biome.items())):
+        fill = "generate"
+        if len(ts) > 2 and rng.random() < duplicate_rate:
+            fill = "shallow_copy" if i % 2 == 0 else "deep_copy"
+        regions.append(
+            {
+                "name": biome,
+                "biome": biome,
+                "intent": f"{biome.replace('_', ' ')} tile",
+                "shapes": [{"kind": "hex", "center": {"q": t["q"], "r": t["r"]}, "radius": 0} for t in ts],
+                "fill": fill,
+            }
+        )
+    if voids:
+        regions.append(
+            {"name": "gaps", "biome": regions[0]["biome"], "intent": "gap", "mode": "void", "shapes": voids}
+        )
+    return {"regions": regions, "landmarks": landmarks, "routes": []}

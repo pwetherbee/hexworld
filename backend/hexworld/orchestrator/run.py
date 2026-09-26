@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -52,6 +53,7 @@ from hexworld.domain import (
     CopySpec,
     Directive,
     EdgeSpec,
+    Layout,
     PlannedTile,
     Run,
     RunStatus,
@@ -61,11 +63,13 @@ from hexworld.domain import (
     TileStatus,
     Verdict,
     World,
+    WorldHeader,
     WorldPlan,
 )
 from hexworld.domain.art import MaterialSpec, SpriteEntry, kind_key
-from hexworld.hex import DIRECTION_NAMES, ORIGIN, Hex, opposite, spiral
+from hexworld.hex import DIRECTION_NAMES, ORIGIN, Hex, opposite
 from hexworld.orchestrator.copies import apply_copy, copy_fits, resolve_root, sync_shallow_copies
+from hexworld.orchestrator.layout import Rasterized, rasterize
 from hexworld.orchestrator.validators import CheckResult, check_candidate
 from hexworld.telemetry import Span, Tracer
 
@@ -235,18 +239,22 @@ class RunExecutor:
 
     async def _plan(self, root: Span) -> None:
         w = self.world
-        candidates = [
+        opts = self.run.options
+        reach = 4 + math.ceil(math.sqrt(opts.max_tiles))
+        occupied = [
             h
-            for h in spiral(self.origin, self.run.options.radius)
-            if h.distance(ORIGIN) <= w.radius
-            and (self._tile(h).status in FREE_STATUSES or self._tile(h).run_id == self.run.id)
+            for h, t in self.tiles.items()
+            if t.status not in FREE_STATUSES
+            and t.run_id != self.run.id
+            and h.distance(self.origin) <= reach * 2
         ]
-        cand_set = set(candidates)
+        occupied_set = set(occupied)
         nearby = []
-        for h, t in self.tiles.items():
-            if t.status != TileStatus.accepted:
+        for h in occupied:
+            t = self.tiles[h]
+            if t.status != TileStatus.accepted or h.distance(self.origin) > reach:
                 continue
-            touching = [i for i in range(6) if h.neighbor(i) in cand_set]
+            touching = [i for i in range(6) if h.neighbor(i) not in occupied_set]
             if touching:
                 nearby.append(
                     {
@@ -254,7 +262,7 @@ class RunExecutor:
                         "r": h.r,
                         "biome": t.biome,
                         "summary": t.summary,
-                        "edges_facing_new_area": {
+                        "edges_facing_free_space": {
                             DIRECTION_NAMES[i]: t.edges[i].model_dump() for i in touching
                         }
                         if t.edges
@@ -264,19 +272,38 @@ class RunExecutor:
         nearby_png = None
         if nearby:
             region = {
-                Hex(n["q"], n["r"]): self._array(self.tiles[Hex(n["q"], n["r"])].asset_id) for n in nearby
+                Hex(n["q"], n["r"]): self._array(self.tiles[Hex(n["q"], n["r"])].asset_id)
+                for n in nearby[:60]
             }
             nearby_png = to_png(render_region(region, tile_px=w.style.tile_px if w.style else 32, scale=3))
-        async with self.tracer.span("super.plan", root, candidates=len(candidates)) as sp:
+
+        def raster(layout: Layout, header: WorldHeader) -> Rasterized:
+            vocab_c = set(header.world.connector_vocabulary) | set(
+                w.spec.connector_vocabulary if w.spec else []
+            )
+            return rasterize(
+                layout,
+                origin=self.origin,
+                origin_tile=header.origin_tile,
+                max_tiles=opts.max_tiles,
+                world_radius=w.radius,
+                occupied=occupied_set,
+                connectors=vocab_c,
+            )
+
+        async with self.tracer.span("super.plan", root, max_tiles=opts.max_tiles) as sp:
             plan = await super_agent.plan_world(
                 self.kit,
                 world=w,
                 prompt=self.run.prompt,
                 origin=self.origin,
-                candidates=candidates,
+                max_tiles=opts.max_tiles,
+                world_radius=w.radius,
+                occupied=occupied,
                 nearby=nearby,
                 nearby_png=nearby_png,
                 parent=sp,
+                rasterize=raster,
                 on_header=self._on_header,
             )
             plan = self._apply_plan(plan)
@@ -1138,11 +1165,12 @@ class RunExecutor:
             t.status == TileStatus.accepted for t in self.tiles.values()
         )
         out = []
+        seeds = self._island_seeds(pending, busy)
         for t in pending.values():
             if any(n in busy or n in self._waiting for n in t.hex.neighbors()):
                 continue
             touching = any(self._settled(n) for n in t.hex.neighbors())
-            if not (touching or (not world_started and t.hex == self.origin)):
+            if not (touching or (not world_started and t.hex == self.origin) or t.hex in seeds):
                 continue
             spec = t.directive.duplicate if t.directive else None
             if spec is not None:
@@ -1151,6 +1179,36 @@ class RunExecutor:
                     continue  # a copy waits for its prototype to settle
             out.append(t)
         return sorted(out, key=self._score, reverse=True)
+
+    def _island_seeds(self, pending: dict[Hex, Tile], busy: set[Hex]) -> set[Hex]:
+        """Islands of the plan (components not connected to the origin's) grow in parallel: each
+        idle island may start from its tile nearest the origin."""
+        plan_hexes = set(pending) | busy | set(self._provisional)
+        plan_hexes |= {
+            h for h, t in self.tiles.items() if t.run_id == self.run.id and t.status == TileStatus.accepted
+        }
+        seeds: set[Hex] = set()
+        seen: set[Hex] = set()
+        for start in plan_hexes:
+            if start in seen:
+                continue
+            comp, stack = [], [start]
+            seen.add(start)
+            while stack:
+                h = stack.pop()
+                comp.append(h)
+                for n in h.neighbors():
+                    if n in plan_hexes and n not in seen:
+                        seen.add(n)
+                        stack.append(n)
+            if self.origin in comp:
+                continue
+            active = any(h in busy or h in self._waiting or self._settled(h) for h in comp)
+            touches_world = any(self._settled(n) for h in comp for n in h.neighbors())
+            idle = [h for h in comp if h in pending]
+            if not active and not touches_world and idle:
+                seeds.add(min(idle, key=lambda h: (h.distance(self.origin), h.q, h.r)))
+        return seeds
 
     def _init_growth(self, root: Span) -> None:
         self._wake = asyncio.Event()

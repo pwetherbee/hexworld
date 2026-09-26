@@ -40,33 +40,66 @@ async def test_super_duplicates_filler_tiles_shallow_and_deep(make_runtime):
     assert run.stats.attempts < run.stats.tiles_planned + 3
 
 
-class PlanWithBadDuplicates(FakeClient):
-    def _world_plan(self, p, rng):
-        plan = super()._world_plan(p, rng)
-        by = {(t["q"], t["r"]): t for t in plan["tiles"]}
-        for t in plan["tiles"]:
-            t["leave_empty"] = False
-            t["duplicate"] = {"mode": "none", "source_q": 0, "source_r": 0}
-            t["biome"] = plan["world"]["terrain_vocabulary"][2]
-            t["features"] = []
-        by[(0, 0)]["duplicate"] = {"mode": "shallow", "source_q": 1, "source_r": 0}  # origin: invalid
-        by[(0, 1)]["duplicate"] = {"mode": "deep", "source_q": 1, "source_r": 0}  # valid
-        by[(-1, 1)]["duplicate"] = {"mode": "shallow", "source_q": 0, "source_r": 1}  # copy of a copy
-        by[(1, -1)]["duplicate"] = {"mode": "deep", "source_q": 9, "source_r": 9}  # unknown source
-        return plan
+def test_duplicate_specs_are_sanitized(make_runtime):
+    """The layout DSL only produces valid copies, but plans also arrive by other paths (director
+    updates, resumed runs): the orchestrator must still sanitize arbitrary duplicate specs."""
+    import time
 
+    from hexworld.domain import CopySpec, PlannedTile, Run, StyleGuide, WorldPlan, WorldSpec
+    from hexworld.hex import within
+    from hexworld.orchestrator.run import RunExecutor
 
-async def test_duplicate_specs_are_sanitized(make_runtime):
-    rt = make_runtime(llm=PlanWithBadDuplicates(latency_s=0, reject_rate=0))
-    world, run = await _run(rt, radius=1)
-    assert run.status == RunStatus.completed, run.error
-    plan_ev = next(e for e in rt.store.list_events(run_id=run.id) if e.type == "plan.created")
-    notes = plan_ev.data["duplicate_notes"]
+    rt = make_runtime(llm=FakeClient(latency_s=0, reject_rate=0))
+    world = rt.create_world()
+    run = Run(
+        id="run_t",
+        world_id=world.id,
+        origin=Coord(q=0, r=0),
+        prompt="p",
+        options=RunOptions(),
+        created_at=time.time(),
+    )
+    rt.store.put_run(run)
+    ex = RunExecutor(rt, run)
+
+    def copy(mode, q, r):
+        return CopySpec(mode=mode, source_q=q, source_r=r)
+
+    dups = {
+        (0, 0): copy("shallow", 1, 0),  # origin: invalid
+        (0, 1): copy("deep", 1, 0),  # valid
+        (-1, 1): copy("shallow", 0, 1),  # copy of a copy -> collapses to its root
+        (1, -1): copy("deep", 9, 9),  # unknown source
+    }
+    tiles = [
+        PlannedTile(
+            q=h.q, r=h.r, biome="sand", intent="dunes", duplicate=dups.get((h.q, h.r), copy("none", 0, 0))
+        )
+        for h in within(Hex(0, 0), 1)
+    ]
+    spec = WorldSpec(
+        title="t",
+        genre="g",
+        theme="t",
+        lore="l",
+        terrain_vocabulary=["sand"],
+        connector_vocabulary=[],
+        directional_notes="",
+    )
+    style = StyleGuide(
+        palette=["#000000", "#ffffff", "#ff0000", "#00ff00"],
+        tile_px=64,
+        view="v",
+        light_direction="l",
+        outline="o",
+        style_keywords="k",
+    )
+    plan = ex._apply_plan(WorldPlan(world=spec, style=style, tile_attributes=[], tiles=tiles))
+    notes = ex._plan_notes
     assert any(n.startswith("0,0:") for n in notes) and any(n.startswith("1,-1:") for n in notes)
-    planned = {(t["q"], t["r"]): t["duplicate"] for t in plan_ev.data["tiles"]}
-    assert planned[(-1, 1)] == {"mode": "shallow", "source_q": 1, "source_r": 0}  # collapsed to root
-    tiles = {t.hex: t for t in rt.store.list_tiles(world.id)}
-    assert tiles[Hex(0, 0)].copy_of is None
+    planned = {(t.q, t.r): t.duplicate for t in plan.tiles}
+    assert planned[(-1, 1)] == copy("shallow", 1, 0)  # collapsed to root
+    assert planned[(0, 0)].mode == "none" and planned[(1, -1)].mode == "none"
 
 
 def _tile(q, r, asset, **kw):

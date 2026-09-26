@@ -265,6 +265,68 @@ class WorldPlan(BaseModel):
     tiles: list[PlannedTile]
 
 
+# --------------------------------------------------------------------------- layout DSL
+# The planner describes the map's SHAPE with regions made of shape primitives, plus landmarks and
+# connector routes; the engine rasterizes it into tiles (orchestrator/layout.py). This lets the super
+# draw long coasts, archipelagos, patchwork districts or floor plans at any size, cheaply.
+
+
+class ShapeSpec(BaseModel):
+    kind: Literal["hex", "blob", "path", "rect"] = Field(
+        description="hex: all tiles within `radius` of center. blob: an organic, irregular patch of about "
+        "`radius` around center (`roughness` 0 = round .. 1 = ragged). path: a band through `points` "
+        "(>= 2 waypoints), `width` tiles wide: ridges, coasts, corridors, streets, long valleys. rect: "
+        "`w` columns x `h` rows around center: districts, city blocks, rooms and halls."
+    )
+    center: Coord | None = None
+    radius: int = Field(default=2, ge=0, le=14)
+    roughness: float = Field(default=0.4, ge=0, le=1)
+    points: list[Coord] = Field(default_factory=list)
+    width: int = Field(default=1, ge=1, le=5)
+    w: int = Field(default=3, ge=1, le=24)
+    h: int = Field(default=3, ge=1, le=24)
+
+
+class Region(BaseModel):
+    name: str
+    biome: str = Field(description="From terrain_vocabulary.")
+    intent: str = Field(description="What this region is (<= 12 words); becomes each tile's intent.")
+    shapes: list[ShapeSpec] = Field(description="Union of shapes; later regions paint over earlier ones.")
+    mode: Literal["add", "void"] = Field(
+        default="add", description="'void' carves these tiles out (gaps, bays, courtyards, chasms)."
+    )
+    features: list[str] = Field(
+        default_factory=list, description="Sprite kinds scattered over the region's tiles."
+    )
+    feature_density: float = Field(
+        default=0.3, ge=0, le=1, description="Share of the region's tiles that get a feature (dense = 1-2)."
+    )
+    priority: int = Field(default=3, ge=1, le=5)
+    fill: Literal["generate", "shallow_copy", "deep_copy"] = Field(
+        default="generate",
+        description="Filler regions (open sea, plain desert) may copy one prototype tile to save cost.",
+    )
+
+
+class Landmark(BaseModel):
+    q: int
+    r: int
+    intent: str
+    features: list[str] = Field(default_factory=list)
+    biome: str | None = Field(default=None, description="Override the region's biome here.")
+
+
+class Route(BaseModel):
+    connector: str = Field(description="From connector_vocabulary (river, road, corridor...).")
+    points: list[Coord] = Field(description=">= 2 waypoints; the route runs tile to tile between them.")
+
+
+class Layout(BaseModel):
+    regions: list[Region]
+    landmarks: list[Landmark] = Field(default_factory=list)
+    routes: list[Route] = Field(default_factory=list)
+
+
 class WorldHeader(BaseModel):
     """First half of a plan: enough to start building the origin while the rest is planned."""
 
@@ -419,14 +481,23 @@ class World(BaseModel):
 
 
 class RunOptions(BaseModel):
-    radius: int = Field(
-        default=5, ge=1, le=8, description="How far from the clicked tile the super may expand."
+    max_tiles: int = Field(
+        default=40, ge=1, le=250, description="Upper bound on tiles the super may plan (it picks the shape)."
+    )
+    radius: int | None = Field(
+        default=None, ge=0, le=9, description="Deprecated: a hexagon of this radius' worth of tiles."
     )
     max_attempts: int = Field(default=3, ge=1, le=6)
     review_batch: int = Field(default=12, ge=1, le=16)
     max_llm_calls: int = Field(default=1500, ge=1)
     max_cost_usd: float = Field(default=2.0, gt=0)
     max_seconds: float = Field(default=2400, gt=0)
+
+    @model_validator(mode="after")
+    def _radius_to_tiles(self) -> RunOptions:
+        if self.radius is not None and "max_tiles" not in self.model_fields_set:
+            self.max_tiles = 3 * self.radius * (self.radius + 1) + 1
+        return self
 
 
 class RunStats(BaseModel):

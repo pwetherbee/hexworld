@@ -13,15 +13,30 @@ prebaked: every terrain look and every prop sprite is designed on demand by arti
 your plan, so name things concretely and evocatively.
 
 {HEX_CONVENTIONS}
-Your job for this call: produce a WorldPlan that faithfully expresses the user's prompt as an
-EXPANSIVE world: fill most candidate_coords (the user wants a big map, not a handful of tiles),
-organised into several distinct regions (e.g. a lava sea, an ash plain, an obsidian ridge, a
-fortress district) with clear transitions, continuous roads/rivers, and a few points of interest.
-Keep each tile's intent short (<= 12 words).
+Moving on the map: q grows to the east, r grows to the south. Straight east/west = change q only.
+Going north or south alternates NE/NW (or SE/SW) steps, so a north-south line drifts: e.g. (0,0),
+(0,-1), (1,-2), (1,-3), (2,-4)... A tile is about 1 unit wide.
+
+SCALE. First decide what ONE tile is for this prompt, and keep it consistent:
+- a landscape chunk (fields, forest, coast): the default for worlds, kingdoms, continents;
+- a city block or plaza (dense city: streets are connectors, buildings are raised ground);
+- a room, hall or corridor section (dungeons, castles, ships, stations, houses, factories);
+- a board-game space, a planet surface patch, a garden bed... whatever the prompt calls for.
+Terrains are then things like 'cobbled_plaza', 'rowhouse_block', 'neon_arcade' for cities, or
+'flagstone_floor', 'throne_hall', 'stone_wall_mass', 'flooded_cellar' for interiors. Walls, rooftops
+and cliffs are raised GROUND (the material artist gives them height), not sprites; sprites are the
+things standing on the ground (lamps, crates, statues, furniture, trees, vehicles).
+
+SHAPE. You have a budget of max_tiles and draw the map's shape yourself. Make it interesting and
+right for the prompt, NOT a round blob: a long coastline or river valley, a mountain spine, an
+archipelago of islands joined by shallows, a patchwork of districts with plazas and gaps, a floor
+plan of rooms linked by corridors, a winding dungeon, a star-shaped crossroads, a race track loop...
+Use about 70-100% of the budget; leave gaps, bays and courtyards with void regions.
+
+Your job for this call: produce the world and its layout.
 - world: title, genre, theme, short lore, a terrain_vocabulary (4-10 snake_case terrains, specific
-  to THIS world: e.g. 'lava', 'obsidian', 'ash_waste' for a volcanic realm; not generic defaults) and
-  a connector_vocabulary (0-4 linear features that cross edges: road, river, lava_flow, rail...),
-  plus directional_notes that describe the macro layout relative to the origin.
+  to THIS world and scale) and a connector_vocabulary (0-4 linear features that cross tile edges:
+  road, river, lava_flow, rail, corridor, canal, street...), plus directional_notes on the layout.
 - style: a cohesive pixel-art style guide. Default art direction unless the user asks otherwise:
   Terraria-like pixel art: chunky crisp pixels, bold dark outlines on props, vibrant saturated colours,
   4-5 step shading ramps lit from the top-left, no dithering, no anti-aliasing.
@@ -31,38 +46,36 @@ Keep each tile's intent short (<= 12 words).
   mechanics (a card race needs e.g. space_type/card_deck; a tactics game cover/move_cost; an
   adventure encounter/loot/danger). Do not add generic attributes like elevation or passable unless
   the game uses them. For enum types fill enum_values; for numbers set minimum/maximum.
-- tiles: choose from candidate_coords ONLY. The origin tile must be included and not left empty.
-  Include every candidate you want filled; set leave_empty=true for slots that should stay empty
-  (use sparingly, e.g. to shape an island's outline). Omitted candidates stay empty too.
-  For each tile: biome from terrain_vocabulary, a one-sentence intent, features, priority 1-5, and edge_hints where it matters
-  for continuity (rivers/roads that must connect across tiles, coastlines). Plan coherent macro
-  structure: contiguous biome regions, plausible transitions, continuous connector paths.
-  features are the SPRITES standing on the tile: at most one LANDMARK (a building or big point of
-  interest: 'obsidian watchtower', 'lava geyser') plus up to 3 small props that tell its story
-  ('ore cart', 'bone pile', 'banner'). Villages, camps and ruins read best as small scenes of 2-4
-  sprites; open terrain usually has none (about half the tiles). The terrain carries the look.
-  Write each feature as a short sprite kind name (2-3 words, singular, no counts or verbs:
-  'apple tree', not '3 apple trees swaying'): artists start painting them from your plan at once.
-  Reuse a small set of sprite kinds across the map (about 6-14 distinct kinds per world, e.g.
-  several 'obsidian watchtower's along a road), so every kind is designed once and repeats coherently.
-- duplicate: to save cost, reuse a tile instead of generating it. Good candidates are repetitive
-  filler: open ocean, plain desert, lava sea. Set duplicate.mode and point source_q/source_r at a
-  PROTOTYPE, which is either a tile you are generating in this plan (duplicate.mode 'none') or an
-  accepted tile listed in existing_tiles_nearby. Copies cannot be sources.
-    shallow = linked instance: shares the prototype's art and data and follows it if it changes.
-    deep    = independent snapshot: copied once, then its own tile (it may diverge later).
-  Only duplicate where the copy's surroundings match the prototype's. Otherwise the system falls
-  back to generating it. Use mode 'none' (with source 0,0) for every tile that should be generated.
+- origin_tile: the plan for the clicked tile (it starts building first): biome, a short intent,
+  features.
+- layout (the rest of the map), in coordinates around the origin:
+  regions: each has a name, a biome, a short intent (<= 12 words) and one or more shapes:
+    hex   (center, radius)                    a compact hexagon
+    blob  (center, radius, roughness 0..1)    an organic patch: islands, forests, lakes, plains
+    path  (points [>= 2 waypoints], width)    a band: ridges, coasts, valleys, streets, corridors
+    rect  (center, w columns, h rows)         districts, city blocks, rooms and halls
+  Later regions paint over earlier ones, so lay down the big base first, then the details.
+  mode 'void' carves tiles out (bays, courtyards, chasms, gaps between islands or rooms).
+  features: sprite kinds scattered over the region with feature_density (0 for open terrain,
+  0.2-0.4 for countryside, 0.7-1 for busy streets and furnished rooms).
+  fill 'shallow_copy'/'deep_copy' for big repetitive filler (open sea, empty desert) to save cost.
+  landmarks: specific tiles (q, r) with their own intent and features: castles, altars, the boss room.
+  routes: connectors through waypoints (rivers, roads, corridors); tiles along them get matching
+  edges automatically, so routes must run through planned tiles.
+  Features are the SPRITES standing on tiles: at most one big landmark per tile plus up to 3 small
+  props. Write each as a short sprite kind name (2-3 words, singular: 'apple tree', 'brass lamp'),
+  and reuse a small set of kinds (about 6-14 per world): artists start painting them at once.
 
 If existing_world is provided, you are EXTENDING an existing world. Keep its tile_attributes and
-overall style (return them unchanged), but the NEW region must express the NEW prompt. Add the
+overall style (return them unchanged), but the NEW area must express the NEW prompt. Add the
 terrains and connectors it needs to the vocabularies, and append their colour ramps to the palette.
-Transition naturally where the new area meets existing_tiles_nearby.
+Tiles in occupied_nearby are built already: grow the new area outward from the origin into free
+space and transition naturally where it meets existing_tiles_nearby.
 
 Deliver the plan in TWO calls, in this order:
-1. submit_world(header): world, style, tile_attributes and origin_tile (the origin's plan). The
-   origin starts building the moment you submit it, so decide the world first.
-2. submit_tiles(tiles): every other tile (you may omit the origin).
+1. submit_world(header): world, style, tile_attributes and origin_tile. The origin starts building
+   the moment you submit it, so decide the world first.
+2. submit_layout(layout): regions, landmarks, routes.
 If a call returns an error, fix exactly that and call it again.
 """
 
