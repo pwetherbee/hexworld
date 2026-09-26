@@ -97,3 +97,35 @@ def test_occupied_tiles_are_skipped_and_origin_tile_kept():
     )
     by = {Hex(t.q, t.r): t for t in res.tiles}
     assert Hex(1, 0) not in by and by[ORIGIN].biome == "town" and by[ORIGIN].features == ["well"]
+
+
+def test_stray_fragments_are_dropped_but_islands_kept():
+    from hexworld.domain import Layout, Region, ShapeSpec
+    from hexworld.hex import ORIGIN, Hex
+    from hexworld.orchestrator.layout import rasterize
+
+    def hexshape(q, r, radius):
+        return ShapeSpec(kind="hex", center={"q": q, "r": r}, radius=radius)
+
+    layout = Layout(
+        regions=[
+            Region(name="main", biome="grass", intent="", shapes=[hexshape(0, 0, 1)]),
+            Region(name="stray", biome="grass", intent="", shapes=[hexshape(6, 0, 0)]),
+            Region(name="isle", biome="grass", intent="", shapes=[hexshape(0, 6, 1)]),
+            Region(name="point", biome="grass", intent="", shapes=[hexshape(-3, 0, 0)]),
+        ]
+    )
+    res = rasterize(
+        layout,
+        origin=ORIGIN,
+        origin_tile=None,
+        max_tiles=40,
+        world_radius=30,
+        occupied=set(),
+        connectors=set(),
+    )
+    got = {(t.q, t.r) for t in res.tiles}
+    assert (6, 0) not in got and (0, 6) in got  # far stray dropped, far island kept
+    assert (-3, 0) in got and (-2, 0) in got  # a near fragment is joined to the map
+    assert any("stray" in n for n in res.notes) and any("joined" in n for n in res.notes)
+    assert Hex(0, 0).distance(Hex(6, 0)) == 6

@@ -167,6 +167,121 @@ def split_sheet(png: bytes, n: int) -> list[bytes | None]:
     return out
 
 
+# ----------------------------------------------------------------------------- sprite packs
+
+
+def pack_grid(n: int) -> tuple[int, int]:
+    """(cols, rows) of the smallest near-square grid that holds n sprites (max 4x4)."""
+    for cols, rows in ((1, 1), (2, 1), (2, 2), (3, 2), (3, 3), (4, 3), (4, 4)):
+        if cols * rows >= n:
+            return cols, rows
+    return 4, 4
+
+
+PACK_MAX = 16
+
+
+def pack_frame(style: Any, subjects: list[str], cols: int, rows: int) -> str:
+    """One image, a grid of separate sprites: numbered left-to-right, top-to-bottom."""
+    keywords = getattr(style, "style_keywords", "") if style else ""
+    cells = " ".join(
+        f"[{i + 1}] row {i // cols + 1}, column {i % cols + 1}: {s}." for i, s in enumerate(subjects)
+    )
+    empty = cols * rows - len(subjects)
+    return (
+        f"A sprite sheet: a {cols}x{rows} grid ({cols} columns, {rows} rows) of separate Terraria-style "
+        "16-bit pixel art game sprites, side view, each designed to read at 32x32 pixels: bold simple "
+        "chunky silhouettes made of a few large shapes, thick dark outlines, flat vibrant colours with "
+        "3-tone shading lit from the top-left, strong value contrast, big visible pixels, no thin spikes "
+        f"or fine detail, no anti-aliasing. {keywords}. All sprites share one consistent style, palette "
+        "and light. Exactly one isolated object in each grid cell, centred in its cell and fully inside "
+        "it, using about 70% of the cell, with clear empty space between neighbouring objects. "
+        f"{cells}" + (f" The last {empty} cell(s) stay empty." if empty > 0 else "") + " Transparent "
+        "background, no grid lines, no labels, no numbers, no ground, no drop shadows, no glow, no text."
+    )
+
+
+def _components(mask: np.ndarray) -> tuple[np.ndarray, int]:
+    """4-connected components of a boolean mask -> (labels, count). Plain BFS; masks are small."""
+    from collections import deque
+
+    lab = np.zeros(mask.shape, np.int32)
+    n = 0
+    H, W = mask.shape
+    for y0, x0 in zip(*np.nonzero(mask), strict=True):
+        if lab[y0, x0]:
+            continue
+        n += 1
+        lab[y0, x0] = n
+        dq = deque([(y0, x0)])
+        while dq:
+            y, x = dq.popleft()
+            for yy, xx in ((y - 1, x), (y + 1, x), (y, x - 1), (y, x + 1)):
+                if 0 <= yy < H and 0 <= xx < W and mask[yy, xx] and not lab[yy, xx]:
+                    lab[yy, xx] = n
+                    dq.append((yy, xx))
+    return lab, n
+
+
+def split_grid(png: bytes, cols: int, rows: int, n: int) -> list[bytes | None]:
+    """The first n cells of a painted pack as separate PNGs. Objects are found as blobs and belong
+    to the cell holding their centre, so a sprite that strays a little over a cell line is kept
+    whole; a cell with nothing substantial in it comes back None (repainted later)."""
+    img = Image.open(io.BytesIO(png)).convert("RGBA")
+    a = np.asarray(img)
+    H, W = a.shape[:2]
+    f = 4  # label on a 4x-reduced mask: fast, and joins hairline gaps inside one object
+    small = a[: H // f * f, : W // f * f, 3].reshape(H // f, f, W // f, f).max(axis=(1, 3)) >= 128
+    lab, count = _components(small)
+    cw, ch = W / cols, H / rows
+    owner: dict[int, list[int]] = {}
+    sizes = np.bincount(lab.ravel(), minlength=count + 1)
+    min_px = (cw / f) * (ch / f) * 0.004  # ignore crumbs
+    for k in range(1, count + 1):
+        if sizes[k] < min_px:
+            continue
+        ys, xs = np.nonzero(lab == k)
+        cx, cy = (xs.mean() + 0.5) * f, (ys.mean() + 0.5) * f
+        cell = min(rows - 1, int(cy // ch)) * cols + min(cols - 1, int(cx // cw))
+        owner.setdefault(cell, []).append(k)
+    out: list[bytes | None] = []
+    big = np.kron(lab, np.ones((f, f), np.int32))
+    big = np.pad(big, ((0, H - big.shape[0]), (0, W - big.shape[1])))
+    for i in range(n):
+        ks = owner.get(i)
+        if not ks or sum(int(sizes[k]) for k in ks) < (cw / f) * (ch / f) * 0.02:
+            out.append(None)
+            continue
+        keep = np.isin(big, ks)
+        ys, xs = np.nonzero(keep)
+        cut = a.copy()
+        cut[~keep, 3] = 0
+        crop = Image.fromarray(cut[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1], "RGBA")
+        buf = io.BytesIO()
+        crop.save(buf, format="PNG")
+        out.append(buf.getvalue())
+    return out
+
+
+def contact_sheet(arts: list[SpriteArt], scale: int = 5) -> bytes:
+    """Sprites side by side at game scale (bottom-aligned, enlarged, on neutral grey)."""
+    gap = 3
+    W = sum(a.w + gap for a in arts) + gap
+    H = max(a.h for a in arts) + 2 * gap
+    sheet = np.zeros((H, W, 4), np.uint8)
+    sheet[..., :3] = (78, 80, 88)
+    sheet[..., 3] = 255
+    x = gap
+    for a in arts:
+        f = a.frames[0]
+        m = f[..., 3] > 0
+        sheet[H - gap - a.h : H - gap, x : x + a.w][m] = f[m]
+        x += a.w + gap
+    buf = io.BytesIO()
+    Image.fromarray(sheet).resize((W * scale, H * scale), Image.Resampling.NEAREST).save(buf, format="PNG")
+    return buf.getvalue()
+
+
 class SheetPainter:
     """Batches concurrent paint requests into 2x2 sprite sheets: one image call paints up to four
     sprites, in the same time and for the same price as one. Requests with the same style that

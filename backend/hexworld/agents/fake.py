@@ -56,6 +56,36 @@ class FakeClient:
                 if "view_map" in called or "view_map" not in tools
                 else ("view_map", {})
             )
+        if task == "sprite_pack":  # the sprite director: describe the pack, pass the review
+            last = followups[-1] if followups else ""
+            if "painted pack" in last:
+                return "submit_repaints", {"repaints": []}
+            kinds = [k["kind"] for k in payload["kinds"]]
+            if "Feedback" in last:
+                kinds = [next((k for k in kinds if f"'{k}'" in last), kinds[0])]
+            items = [
+                {
+                    "kind": k,
+                    "subject": f"a {k.replace('_', ' ')}",
+                    "size": "small" if i % 2 else "medium",
+                    "motion": "none",
+                }
+                for i, k in enumerate(kinds)
+            ]
+            extras = (
+                [
+                    {
+                        "kind": "field mouse",
+                        "subject": "a small grey field mouse",
+                        "size": "small",
+                        "motion": "none",
+                        "terrain": payload["terrains"][0],
+                    }
+                ]
+                if payload.get("free_cells") and payload.get("terrains") and "Feedback" not in last
+                else []
+            )
+            return "submit_pack", {"items": items, "extras": extras}
         rng = _rng(task, payload, len(followups))
         data = getattr(self, f"_{task}")(payload, rng)
         if task == "world_plan" and "submit_world" in tools:  # two-step plan: header, then tiles
@@ -111,6 +141,7 @@ class FakeClient:
                 "terrain_vocabulary": terrains,
                 "connector_vocabulary": list(theme["connectors"]),
                 "directional_notes": "Lower terrain toward the outer rings, higher ground near the heart of the region.",
+                "prop_scale": 1.0,
             }
             style = {
                 "palette": palette_for(terrains, theme["connectors"]),

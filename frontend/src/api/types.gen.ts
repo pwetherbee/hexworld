@@ -80,6 +80,10 @@ export interface WorldSpec {
    * General layout direction, e.g. 'mountains north, coast east'.
    */
   directional_notes: string;
+  /**
+   * Size of every sprite relative to the tile, world-wide (0.3-1.5): 1 when a tile is a landscape chunk or a room, ~0.5 when a tile is a city block (people and cars next to real buildings), up to 1.3 for close-up interiors or board-game spaces.
+   */
+  prop_scale: number;
 }
 /**
  * Shared visual contract for every tile in a world. Set once, then reused.
@@ -175,9 +179,17 @@ export interface MaterialSpec {
    */
   edges: "organic" | "straight";
   /**
+   * Connectors only: 'dashed' paints a road's dashed centre line and kerbs (streets, highways), 'rails' two rails with sleepers (railways, tram and cable-car lines), 'none' otherwise.
+   */
+  markings: "none" | "dashed" | "rails";
+  /**
    * Base relief level 0-4 (liquids 0, plains 1, hills 2, rock 3+).
    */
   height: number;
+  /**
+   * Large-scale rise in relief levels (0-40), grown by the engine as a smooth, ridged landform that blends into neighbouring terrains: 0 flat land and water, 2-5 rolling hills, 6-14 foothills and rocky slopes, 15-40 mountains and snow peaks (a level is ~1/18 of a tile's width). Cities on hills can use it too.
+   */
+  elevation: number;
   /**
    * Relief patterns (<= 3), e.g. ridges.
    */
@@ -190,6 +202,10 @@ export interface MaterialSpec {
    * Ambient sprites for tiles of this material (<= 2 kinds).
    */
   scatter: ScatterSpec[];
+  /**
+   * For BUILT terrain only: buildings raised out of this ground as 3D blocks. The material's own colours and ops then describe the streets/yards between them.
+   */
+  buildings: BuildingsSpec | null;
 }
 /**
  * Relief pattern, evaluated per BLOCK in world space: selected blocks are raised/lowered by
@@ -286,6 +302,81 @@ export interface ScatterSpec {
    * Sprites per tile of this material (0-8).
    */
   count: number;
+  /**
+   * Share of this material's tiles that get it (0-1).
+   */
+  chance: number;
+}
+/**
+ * Buildings as terrain: the engine lays out footprints on the world pixel grid, raises each
+ * building FLOOR_LEVELS relief levels per floor (in 3D they are real blocks with pixel-art facades),
+ * paints roofs into the ground and leaves the gaps (streets, alleys, yards) in the material's own
+ * pattern. Use it for any built terrain: city blocks, row houses, villages, towers, castles, ports.
+ *
+ * This interface was referenced by `ApiSchemas`'s JSON-Schema
+ * via the `definition` "BuildingsSpec".
+ */
+export interface BuildingsSpec {
+  /**
+   * blocks: staggered city blocks with alleys. rows: terraced/row houses side by side (Victorian streets, old towns). detached: houses with yards (suburbs, villages). towers: few large towers with plazas between (downtowns). compound: one big walled building per lot with a courtyard (castles, cloisters, warehouses).
+   */
+  layout: "blocks" | "rows" | "detached" | "towers" | "compound";
+  /**
+   * Typical footprint size in pixels (6-40; a tile is ~55px).
+   */
+  lot_px: number;
+  /**
+   * Alley/yard width between buildings in pixels (1-8).
+   */
+  gap_px: number;
+  /**
+   * City streets on the world's shared street lattice, so they join up across tiles and districts: 0 = no street grid (villages, castles, estates), 1 = a street on every lattice line (dense blocks about half a tile wide), 2 = every other line (big blocks, a tile wide).
+   */
+  street_grid: number;
+  /**
+   * The world's street connector name (e.g. 'street') that the grid streets are paved with, so they look exactly like the connector streets; '' = plain asphalt.
+   */
+  street_material: string;
+  /**
+   * Share of lots that hold a building (0.2-1).
+   */
+  coverage: number;
+  /**
+   * Floors of the lowest buildings (1-40).
+   */
+  floors_min: number;
+  /**
+   * Floors of the tallest buildings (1-60).
+   */
+  floors_max: number;
+  /**
+   * Share of buildings near floors_max (the skyline); the rest skew low.
+   */
+  tall_share: number;
+  /**
+   * 1-6 '#rrggbb' facade colours, varied per building.
+   */
+  wall_colors: string[];
+  /**
+   * 1-4 '#rrggbb' roof colours.
+   */
+  roof_colors: string[];
+  /**
+   * Window pattern drawn on the walls: punched (brick/plaster, a grid of windows), glass (curtain-wall towers), bands (office ribbon windows), victorian (tall narrow bays), industrial (sparse high windows), stone (castles, few slits).
+   */
+  facade: "punched" | "glass" | "bands" | "victorian" | "industrial" | "stone";
+  /**
+   * Share of lit (warm) windows, 0-1 (night cities high).
+   */
+  lit: number;
+  /**
+   * flat, parapet (raised rim), gabled (a ridge), terrace (stepped).
+   */
+  roof: "flat" | "parapet" | "gabled" | "terrace";
+  /**
+   * Rooftop details (vents, water tanks), 0-1.
+   */
+  clutter: number;
 }
 /**
  * This interface was referenced by `ApiSchemas`'s JSON-Schema
@@ -431,7 +522,7 @@ export interface EdgeSpec {
  * via the `definition` "TileLayer".
  */
 export interface TileLayer {
-  kind: "ground" | "height" | "sprite";
+  kind: "ground" | "height" | "facade" | "sprite";
   asset_id: string;
   label: string;
   x: number;

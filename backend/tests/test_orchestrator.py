@@ -396,3 +396,52 @@ async def test_tile_resolution_is_a_world_setting_and_sprites_keep_their_size(ma
         assert Image.open(_io.BytesIO(rt.store.get_asset(ground.asset_id))).size == (px + 3, px + 3)
         widths[px] = sorted(round(la.width, 3) for t in tiles for la in t.layers if la.kind == "sprite")
     assert widths[64] == widths[128]  # the same props, the same size on the map
+
+
+class _PackPainter:
+    """Paints a grid of solid blobs, one per requested cell, and records every call."""
+
+    model = "gpt-image-2.5-flare"
+
+    def __init__(self):
+        self.calls: list[int] = []
+
+    async def paint(self, prompt: str):
+        import io
+        import re
+
+        import numpy as np
+        from PIL import Image
+
+        m = re.search(r"a (\d)x(\d) grid", prompt)
+        cols, rows = (int(m.group(1)), int(m.group(2))) if m else (1, 1)
+        n = len(re.findall(r"\[\d+\]", prompt)) or 1
+        self.calls.append(n)
+        a = np.zeros((1024, 1024, 4), np.uint8)
+        cw, ch = 1024 // cols, 1024 // rows
+        for i in range(n):
+            y, x = (i // cols) * ch, (i % cols) * cw
+            a[y + ch // 4 : y + 3 * ch // 4, x + cw // 3 : x + 2 * cw // 3] = (200, 60 + 10 * i, 40, 255)
+        buf = io.BytesIO()
+        Image.fromarray(a).save(buf, format="PNG")
+        return buf.getvalue(), {"input_tokens": 100, "output_tokens": 200, "text_input_tokens": 100}
+
+
+async def test_sprites_are_painted_in_packs(make_runtime):
+    rt = make_runtime(fake_reject_rate=0.0)
+    painter = _PackPainter()
+    rt.painter = painter
+    world, run = await _run(rt, radius=2)
+    assert run.status == RunStatus.completed, run.error
+    w = rt.store.get_world(world.id)
+    assert len(w.sprites) >= 3
+    # the whole cast came out of a few image calls, most of them multi-sprite packs
+    assert len(painter.calls) < len(w.sprites) and max(painter.calls) >= 3
+    assert all(e.prompt for e in w.sprites.values())  # described by the director
+    placed = {la.asset_id for t in rt.store.list_tiles(world.id) for la in t.layers if la.kind == "sprite"}
+    assert placed and placed <= {e.asset_id for e in w.sprites.values()}
+    evs = rt.store.list_events(run_id=run.id, limit=100000)
+    assert any(e.type == "library.sprite_pack.finished" for e in evs)
+    # the director filled a spare cell with ambient life, spread over its terrain by the material
+    assert "field mouse" in w.sprites
+    assert any(sc.kind == "field mouse" and sc.chance < 1 for m in w.materials.values() for sc in m.scatter)

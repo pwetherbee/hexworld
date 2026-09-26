@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store";
-import { HexLogo, IconChevron, IconFollow, IconPanel, IconPlus, IconSound } from "./icons";
+import { HexLogo, IconChevron, IconFollow, IconPanel, IconPlus, IconSound, IconTrash } from "./icons";
 
 /** Top-left: world name; expands into the world switcher. */
 export function WorldPill() {
   const world = useStore((s) => s.world);
   const worlds = useStore((s) => s.worlds);
   const [open, setOpen] = useState(false);
+  const [confirming, setConfirming] = useState<string | null>(null); // world id awaiting a 2nd click
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
+    if (!open) setConfirming(null);
     if (!open) return;
     const close = (e: PointerEvent) => !ref.current?.contains(e.target as Node) && setOpen(false);
     window.addEventListener("pointerdown", close);
@@ -25,18 +27,6 @@ export function WorldPill() {
       </button>
       <div className="pill-body">
         <div className="pill-body-inner">
-          {worlds.map((w) => (
-            <button
-              key={w.id}
-              className={`menu-item ${w.id === world?.id ? "active" : ""}`}
-              onClick={() => {
-                setOpen(false);
-                void useStore.getState().openWorld(w.id);
-              }}
-            >
-              {w.spec?.title ?? w.name}
-            </button>
-          ))}
           <button
             className="menu-item accent"
             onClick={() => {
@@ -46,6 +36,34 @@ export function WorldPill() {
           >
             <IconPlus /> New world
           </button>
+          <div className="world-list">
+            {worlds.map((w) => (
+              <div key={w.id} className={`menu-row ${confirming === w.id ? "confirming" : ""}`}>
+                <button
+                  className={`menu-item ${w.id === world?.id ? "active" : ""}`}
+                  onClick={() => {
+                    setOpen(false);
+                    void useStore.getState().openWorld(w.id);
+                  }}
+                >
+                  {w.spec?.title ?? w.name}
+                </button>
+                <button
+                  className="menu-delete"
+                  aria-label={confirming === w.id ? "Confirm delete" : `Delete ${w.spec?.title ?? w.name}`}
+                  data-tip={confirming === w.id ? "Click again to delete" : "Delete world"}
+                  onClick={() => {
+                    if (confirming !== w.id) return setConfirming(w.id);
+                    setConfirming(null);
+                    void useStore.getState().deleteWorld(w.id);
+                  }}
+                  onPointerLeave={() => confirming === w.id && setConfirming(null)}
+                >
+                  {confirming === w.id ? "delete?" : <IconTrash />}
+                </button>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     </div>

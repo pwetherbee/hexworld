@@ -27,8 +27,8 @@ import numpy as np
 
 from hexworld.agents.themes import base_color, hex_to_rgb, rgb_to_hex, shade
 from hexworld.art.grid import TileCanvas
-from hexworld.art.relief import LIQUID_BIT, MAX_LEVEL, relief_shade
-from hexworld.domain.art import MaterialSpec, PatternOp
+from hexworld.art.relief import FACADE_SHIFT, LIQUID_BIT, MAX_LEVEL, facade_code, relief_shade
+from hexworld.domain.art import BuildingsSpec, MaterialSpec, PatternOp
 from hexworld.hex import DIRECTION_ANGLES, SQRT3, Hex
 
 RAMP_FACTORS = {"outline": 0.42, "dark": 0.72, "base": 1.0, "light": 1.24, "hi": 1.5}
@@ -43,6 +43,46 @@ def block_size(tile_px: int) -> int:
 def unit(tile_px: int) -> float:
     """Feature scale (road width, wobble) relative to the tile."""
     return tile_px / 8
+
+
+# The world's street lattice: vertical lines through every tile centre column (x = i * sqrt3/2 * s)
+# and horizontal lines through every tile centre and midway between rows (y = j * 0.75 * s), in world
+# pixels (hex (0, 0) is centred on the origin). Straight connectors run on it (see
+# straight_segments) and so do the street grids of built materials, so every road joins up.
+def lattice(tile_px: int) -> tuple[float, float]:
+    s = tile_px / 2
+    return s * SQRT3 / 2, 0.75 * s
+
+
+def street_half(tile_px: int) -> float:
+    """Half the width of a street (connector or grid), in pixels."""
+    return unit(tile_px) * 0.36
+
+
+def _line_dist(v: np.ndarray, period: float) -> np.ndarray:
+    return np.abs(v - np.round(v / period) * period)
+
+
+ASPHALT = "__asphalt__"
+
+
+def asphalt_material() -> MaterialSpec:
+    """The engine's plain street, for built materials that don't name a street connector."""
+    return MaterialSpec(
+        base_color="#3e4047",
+        accent_color="#e8d9a0",
+        base_tone="base",
+        liquid=False,
+        rank=5,
+        boundary="none",
+        block_style="flat",
+        edges="straight",
+        markings="dashed",
+        height=1,
+        height_ops=[],
+        ops=[PatternOp(op="speckle", tone="light", scale=2, amount=0.08, angle=0, pixels=[])],
+        scatter=[],
+    )
 
 
 MAX_BASE_LUM = 0.8
@@ -347,7 +387,7 @@ def frame_blocks(img: np.ndarray, mat: np.ndarray, heights: np.ndarray, ctx: Ctx
     block's frame (bevel light/shade, or outline) is drawn only on faces exposed to a different
     material or level."""
     B = ctx.B
-    key = mat.astype(np.int32) * 64 + heights.astype(np.int32)
+    key = mat.astype(np.int32) * 1024 + heights.astype(np.int32)
     up = (ctx.ly == 0) & (_shift(key, -1, 0) != key)
     left = (ctx.lx == 0) & (_shift(key, 0, -1) != key)
     down = (ctx.ly == B - 1) & (_shift(key, 1, 0) != key)
@@ -362,6 +402,156 @@ def frame_blocks(img: np.ndarray, mat: np.ndarray, heights: np.ndarray, ctx: Ctx
             img[shade_] = img[shade_] * 0.72
         else:  # outline
             img[m & (up | left | down | right)] = ramps[k]["outline"]
+
+
+FLOOR_LEVELS = 1  # relief levels per building floor (1 level = 0.055 world units in 3D)
+
+
+def _hex_rgb(c: str) -> np.ndarray:
+    return np.array(hex_to_rgb(c), dtype=np.float32)
+
+
+def paint_buildings(
+    img: np.ndarray,
+    heights: np.ndarray,
+    facade: np.ndarray,
+    codes: np.ndarray,
+    m: np.ndarray,
+    ctx: Ctx,
+    b: BuildingsSpec,
+    name: str,
+) -> None:
+    """Raise buildings out of this material's ground: footprints on a world-aligned lot grid (so
+    buildings continue across tiles), floors per lot (skewed low, with a skyline share of tall ones),
+    roofs painted into the ground, wall colours and facade codes for the 3D facades."""
+    seed = _seed(name, 777)
+    k = ctx.k
+    px, py = np.floor(ctx.wx), np.floor(ctx.wy)
+    lot = max(6.0, round(b.lot_px * k))
+    gap = max(1.0, round(b.gap_px * k))
+    if b.layout == "rows":
+        sx, sy, stagger = max(4.0, round(lot * 0.45)), lot, 0.0
+    elif b.layout == "detached":
+        sx = sy = lot + 2 * gap
+        stagger = sx / 2
+    elif b.layout == "towers":
+        sx = sy = round(lot * 1.6)
+        stagger = 0.0
+    elif b.layout == "compound":
+        sx = sy = round(lot * 2)
+        stagger = 0.0
+    else:  # blocks
+        sx, sy, stagger = lot, max(6.0, round(lot * 0.8)), lot / 2
+    if b.street_grid > 0:  # blocks between the lattice streets (painted by the caller), lots inside
+        P = round(ctx.k * 64)
+        X, Y = lattice(P)
+        half = street_half(P)
+        cw, ch = X * b.street_grid, Y * b.street_grid
+        # lattice lines pass through world 0, so block i spans [i*cw + half, (i+1)*cw - half]
+        bx, by = np.floor(ctx.wx / cw), np.floor(ctx.wy / ch)
+        ix, iy = ctx.wx - bx * cw - half, ctx.wy - by * ch - half
+        iw, ih = cw - 2 * half, ch - 2 * half
+        nx, ny = max(1, round(iw / sx)), max(1, round(ih / sy))  # whole lots per block, no slivers
+        sx, sy = iw / nx, ih / ny
+        col = bx * 64 + np.clip(np.floor(ix / sx), 0, nx - 1)
+        row = by * 64 + np.clip(np.floor(iy / sy), 0, ny - 1)
+        lx, ly = ix - (col - bx * 64) * sx, iy - (row - by * 64) * sy
+    else:
+        row = np.floor(py / sy)
+        x = px + (row % 2) * stagger
+        col = np.floor(x / sx)
+        lx, ly = x - col * sx, py - row * sy
+    # footprint bounds inside the lot
+    if b.layout == "rows":
+        x0, x1, y0, y1 = 0.0, sx, gap, sy
+    elif b.layout == "blocks":
+        x0, x1, y0, y1 = gap, sx, gap, sy
+    else:
+        x0, x1, y0, y1 = gap, sx - gap, gap, sy - gap
+    inside = (lx >= x0) & (lx < x1) & (ly >= y0) & (ly < y1)
+    if b.layout == "compound":  # a walled ring around a courtyard, taller corners
+        w = max(3.0, round(lot / 4))
+        court = (lx >= x0 + w) & (lx < x1 - w) & (ly >= y0 + w) & (ly < y1 - w)
+        inside &= ~court
+    lid = _hash(col, row, seed)
+    built = m & inside & (lid < b.coverage)
+    if not built.any():
+        return
+    h2, h3 = _hash(col, row, seed + 1.3), _hash(col, row, seed + 2.9)
+    span = b.floors_max - b.floors_min
+    tall = h2 < b.tall_share
+    floors = np.where(
+        tall, b.floors_max - np.floor(h3 * 0.25 * span), b.floors_min + np.floor(span * 0.6 * h3**2)
+    )
+    # edge distance inside the footprint (parapets, ridges, stepped terraces)
+    dl = np.minimum(np.minimum(lx - x0, x1 - 1 - lx), np.minimum(ly - y0, y1 - 1 - ly))
+    extra = np.zeros_like(heights)
+    if b.layout == "compound":
+        corner = (np.minimum(lx - x0, x1 - 1 - lx) < w) & (np.minimum(ly - y0, y1 - 1 - ly) < w)
+        extra += np.where(corner, 2 * FLOOR_LEVELS, 0)
+    if b.roof == "parapet":
+        extra += np.where(dl < 1, 1, 0)
+    elif b.roof == "terrace":
+        extra += np.where(dl >= max(2.0, round(2 * k)), FLOOR_LEVELS * 2, 0)
+    elif b.roof == "gabled":
+        mid = (y0 + y1 - 1) / 2
+        extra += np.where(np.abs(ly - mid) < 1.0, 1, 0)
+    if b.clutter > 0 and b.roof in ("flat", "parapet", "terrace"):  # vents, tanks, AC boxes
+        cx_, cy_ = np.floor(px / 4), np.floor(py / 4)
+        box = (_hash(cx_, cy_, seed + 5.5) < b.clutter * 0.18) & (px % 4 < 2) & (py % 4 < 2) & (dl >= 2)
+        extra += np.where(box, 1, 0)
+    heights[built] += floors[built] * FLOOR_LEVELS + extra[built]
+
+    # roofs
+    roofs = [_hex_rgb(c) for c in b.roof_colors]
+    ridx = np.floor(_hash(col, row, seed + 4.1) * len(roofs)).astype(int)
+    roof = np.stack(roofs)[ridx]
+    shade_ = np.ones(heights.shape, np.float32)
+    if b.roof == "gabled":
+        mid = (y0 + y1 - 1) / 2
+        shade_ = np.where(ly > mid, 0.8, 1.08)  # north slope lit, south slope in shade
+    shade_ = np.where(dl < 1, shade_ * 0.82, shade_)  # the roof's rim
+    shade_ = np.where(extra >= 1, shade_ * 1.12, shade_)
+    img[built] = np.minimum(255, roof[built] * shade_[built][:, None])
+
+    # facades (for the 3D walls and 2D previews)
+    walls = [_hex_rgb(c) for c in b.wall_colors]
+    widx = np.floor(_hash(col, row, seed + 6.7) * len(walls)).astype(int)
+    facade[built] = np.stack(walls)[widx][built].astype(np.uint8)
+    lit = np.clip(b.lit + (_hash(col, row, seed + 8.2) - 0.5) * 0.3, 0, 1)
+    style_code = facade_code(b.facade, 0.0)
+    codes[built] = style_code | np.rint(lit[built] * 31).astype(np.int32)
+
+
+def _blur(a: np.ndarray, sigma: float) -> np.ndarray:
+    r = int(math.ceil(sigma * 2.5))
+    k = np.exp(-0.5 * (np.arange(-r, r + 1) / sigma) ** 2)
+    k /= k.sum()
+    pad = np.pad(a, r, mode="edge")
+    out = np.apply_along_axis(lambda v: np.convolve(v, k, mode="valid"), 0, pad)
+    return np.apply_along_axis(lambda v: np.convolve(v, k, mode="valid"), 1, out)
+
+
+ELEV_SIGMA = 2.0  # blend width between terrains' elevations, in pixels (see elevation_field)
+
+
+def elevation_field(ctx: Ctx, mat: np.ndarray, specs: list[MaterialSpec]) -> np.ndarray:
+    """Large-scale landforms: each terrain's `elevation` target, blended across terrain borders and
+    shaped by ridged world-space noise (peaks, saddles, spurs). The blend only reaches ~7px, which
+    both tiles sharing an edge render identically, so relief stays continuous across the seam.
+    Liquids stay flat."""
+    target = np.array([float(sp.elevation) for sp in specs])[mat]
+    if not target.any():
+        return np.zeros(mat.shape, np.float32)
+    wet = np.array([sp.liquid for sp in specs])[mat]
+    smooth = _blur(target, ELEV_SIGMA)
+    s = 18.0 * ctx.k
+    n1 = value_noise(ctx.wx, ctx.wy, s * 2.2, 71.0)
+    n2 = value_noise(ctx.wx, ctx.wy, s, 73.0)
+    ridge = 1 - np.abs(2 * (0.65 * n1 + 0.35 * n2) - 1)  # 0..1, sharp crests
+    shape = 0.45 + 0.55 * ridge**1.5
+    elev = smooth * shape
+    return np.where(wet, 0.0, elev).astype(np.float32)
 
 
 def material_heights(ctx: Ctx, spec: MaterialSpec, name: str) -> np.ndarray:
@@ -401,10 +591,27 @@ def render_ground(
     materials: dict[str, MaterialSpec | dict] | None = None,
     palette: list[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """(RGB uint8 (C, C, 3), relief levels uint8 (C, C)) for the tile's canvas on the world grid."""
+    """(RGB uint8 (C, C, 3), packed relief int32 (C, C)) for the tile's canvas on the world grid."""
+    rgb, heights, _ = render_ground_full(
+        tile_px=tile_px, biome=biome, edges=edges, coord=coord, materials=materials, palette=palette
+    )
+    return rgb, heights
+
+
+def render_ground_full(
+    *,
+    tile_px: int,
+    biome: str,
+    edges: list[dict],
+    coord: tuple[int, int],
+    materials: dict[str, MaterialSpec | dict] | None = None,
+    palette: list[str] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """-> (ground RGB uint8 (C, C, 3); packed relief int32 (C, C): level | LIQUID_BIT | facade code
+    << FACADE_SHIFT; facade RGB uint8 (C, C, 3): wall colour of each building pixel)."""
     canvas = TileCanvas(Hex(*coord), tile_px)
     U = unit(tile_px)
-    margin = 2 * MAX_LEVEL + 4  # so contours/cliffs at the rim see what lies beyond it
+    margin = 16  # so framing and connectors at the rim see what lies beyond it
     ctx = _ctx(canvas, margin)
     s = canvas.s
     cx, cy = canvas.center
@@ -423,7 +630,17 @@ def render_ground(
     wx_ = value_noise(ctx.bcx, ctx.bcy, U * 1.6, 3.1) - 0.5
     wy_ = value_noise(ctx.bcx, ctx.bcy, U * 1.6, 5.3) - 0.5
     bx0, by0 = ctx.bcx - cx, ctx.bcy - cy  # unwarped (for straight, built connectors)
-    bx, by = bx0 + wx_ * U * 1.2, by0 + wy_ * U * 1.2
+    # the warp fades out toward the rim: a point on a shared edge then belongs to that edge's
+    # terrain in both tiles, even near a corner where three tiles (and three edge terrains) meet
+    d0 = np.max(
+        [
+            (bx0 * math.cos(math.radians(a)) + by0 * math.sin(math.radians(a))) / apothem
+            for a in DIRECTION_ANGLES
+        ],
+        axis=0,
+    )
+    fade = np.clip((1.0 - d0) / 0.3, 0.0, 1.0)
+    bx, by = bx0 + wx_ * U * 1.2 * fade, by0 + wy_ * U * 1.2 * fade
     dots = np.stack(
         [
             (bx * math.cos(math.radians(a)) + by * math.sin(math.radians(a))) / apothem
@@ -444,6 +661,35 @@ def render_ground(
     edge_idx = np.array([names.index(e["terrain"]) for e in edges])
     mat = np.where(band, edge_idx[nearest_edge], 0)
 
+    # --- zoning: where built (straight-edged) terrain meets anything but liquid, whole lattice blocks
+    # change hands, so district borders run along the streets instead of wandering through blocks.
+    # Natural transitions (forest/grass) and coastlines keep their organic borders.
+    X, Y = lattice(tile_px)
+    zx = (np.floor(ctx.wx / X) + 0.5) * X - cx
+    zy = (np.floor(ctx.wy / Y) + 0.5) * Y - cy
+    zdots = np.stack(
+        [
+            (zx * math.cos(math.radians(a)) + zy * math.sin(math.radians(a))) / apothem
+            for a in DIRECTION_ANGLES
+        ],
+        axis=-1,
+    )
+    matz = np.where(zdots.max(-1) > 0.5, edge_idx[zdots.argmax(-1)], 0)
+    # only blocks wholly inside this hex: a block touching an edge is shared with (or borders) the
+    # neighbour, which can't know this tile's zoning; there the organic borders (computed identically
+    # by both tiles) decide, so seams stay continuous
+    reach = np.zeros_like(zx)
+    for sx_, sy_ in ((-1, -1), (-1, 1), (1, -1), (1, 1)):
+        cxs, cys = zx + sx_ * X / 2, zy + sy_ * Y / 2
+        for a in DIRECTION_ANGLES:
+            reach = np.maximum(
+                reach, (cxs * math.cos(math.radians(a)) + cys * math.sin(math.radians(a))) / apothem
+            )
+    built_n = np.array([spec_of(n).edges == "straight" for n in names])
+    wet_n = np.array([spec_of(n).liquid for n in names])
+    zoned = (built_n[mat] | built_n[matz]) & ~wet_n[mat] & ~wet_n[matz] & (reach < 0.985)
+    mat = np.where(zoned, matz, mat)
+
     # --- connectors: blocky paths from the centre to each connector edge's midpoint
     conns = [(i, cn) for i, e in enumerate(edges) for cn in e.get("connectors", [])]
     for cname in sorted({cn for _, cn in conns}):
@@ -451,11 +697,17 @@ def render_ground(
         names.append(cname)
         cspec = spec_of(cname)
         straight = cspec.edges == "straight"
-        px_, py_ = (bx0, by0) if straight else (bx, by)
+        # straight connectors are cut per pixel on the lattice (they must meet grid streets exactly)
+        px_, py_ = (ctx.wx - cx, ctx.wy - cy) if straight else (bx, by)
         width = U * (0.75 if cspec.liquid else 0.55)
+        if straight and not cspec.liquid:
+            width = street_half(tile_px)
         dist = np.full(bx.shape, 1e9)
         mine = [i for i, cn in conns if cn == cname]
-        for i in mine:
+        segs = straight_segments(mine, apothem) if straight else []
+        for x0, y0, x1, y1 in segs:
+            dist = np.minimum(dist, _seg_dist(px_, py_, x0, y0, x1, y1))
+        for i in [] if straight else mine:
             ang = math.radians(DIRECTION_ANGLES[i])
             mx, my = math.cos(ang) * apothem, math.sin(ang) * apothem
             nx, ny = -math.sin(ang), math.cos(ang)
@@ -463,21 +715,42 @@ def render_ground(
             for t in np.linspace(0, 1, 32):
                 off = amp * 1.6 * math.sin(math.pi * t) * (1 - t)  # zero offset & slope at the edge
                 dist = np.minimum(dist, np.hypot(px_ - (mx * t + nx * off), py_ - (my * t + ny * off)))
-        if len(mine) == 1:  # a dead end (spring, road end): a small bulb, not a pond
+        if len(mine) == 1 and not straight:  # a dead end (spring, trail end): a small bulb, not a pond
             dist = np.minimum(dist, np.hypot(px_, py_) - width * 0.3)
-        elif straight and len(mine) > 2:  # a junction: a small square
-            dist = np.minimum(dist, np.maximum(np.abs(px_), np.abs(py_)) - width * 0.6)
         mat = np.where(dist <= width, idx, mat)
+
+    # --- city street grids: built materials give up their lattice-street pixels to a street material
+    half = street_half(tile_px)
+    for k in range(len(names)):
+        b = spec_of(names[k]).buildings
+        if b is None or b.street_grid <= 0:
+            continue
+        mk = mat == k
+        if not mk.any():
+            continue
+        road = b.street_material if b.street_material in lib else ASPHALT
+        if road == ASPHALT:
+            lib.setdefault(ASPHALT, asphalt_material())
+        if road not in names:
+            names.append(road)
+        g = b.street_grid
+        on = (_line_dist(ctx.wx, X * g) <= half) | (_line_dist(ctx.wy, Y * g) <= half)
+        mat = np.where(mk & on, names.index(road), mat)
 
     specs = [spec_of(n) for n in names]
     ramps = [ramp_for(sp) for sp in specs]
     img = np.zeros((ctx.C, ctx.C, 3), dtype=np.float32)
     heights = np.zeros((ctx.C, ctx.C), dtype=np.float32)
+    facade = np.zeros((ctx.C, ctx.C, 3), dtype=np.uint8)
+    codes = np.zeros((ctx.C, ctx.C), dtype=np.int32)
     for k, name in enumerate(names):
         m = mat == k
         if m.any():
             paint_material(img, m, ctx, specs[k], ramps[k], name)
             heights[m] = material_heights(ctx, specs[k], name)[m]
+            if specs[k].buildings is not None:
+                paint_buildings(img, heights, facade, codes, m, ctx, specs[k].buildings, name)
+    heights += elevation_field(ctx, mat, specs)
     heights = np.clip(np.rint(heights), 0, MAX_LEVEL)
     frame_blocks(img, mat, heights, ctx, specs, ramps)
 
@@ -505,10 +778,80 @@ def render_ground(
             elif own.boundary == "lip" and own.rank > other.rank:
                 out[r_, c_] = R["dark"]
 
+    for k, sp in enumerate(specs):
+        if sp.edges == "straight" and sp.markings != "none" and (mat == k).any():
+            paint_markings(out, mat == k, ctx, sp, ramps[k], X, Y, half)
+
     liquid = np.array([sp.liquid for sp in specs])[mat]
-    heights = np.where(liquid, heights.astype(np.int32) | LIQUID_BIT, heights)
+    packed = heights.astype(np.int32) | np.where(liquid, LIQUID_BIT, 0) | (codes << FACADE_SHIFT)
     crop = slice(margin, margin + canvas.C)
-    return np.clip(out[crop, crop], 0, 255).astype(np.uint8), heights[crop, crop].astype(np.uint8)
+    return (
+        np.clip(out[crop, crop], 0, 255).astype(np.uint8),
+        packed[crop, crop].astype(np.int32),
+        facade[crop, crop],
+    )
+
+
+def straight_segments(legs: list[int], apothem: float) -> list[tuple[float, float, float, float]]:
+    """Straight connectors (streets, canals, corridors) run on an axis-aligned grid: E/W legs go
+    straight to the edge; a diagonal leg goes north/south from the centre to its edge midpoint's
+    row, then east/west on to the neighbour's centre line (clipped by the hex). Two tiles sharing
+    that edge draw the same horizontal run, so the network forms one continuous square grid."""
+    segs = []
+    for i in legs:
+        ang = math.radians(DIRECTION_ANGLES[i])
+        mx, my = math.cos(ang) * apothem, math.sin(ang) * apothem
+        if abs(my) < 1e-6:
+            segs.append((0.0, 0.0, mx, 0.0))
+        else:
+            segs.append((0.0, 0.0, 0.0, my))
+            segs.append((0.0, my, 2 * mx, my))
+    return segs
+
+
+def _seg_dist(px: np.ndarray, py: np.ndarray, x0: float, y0: float, x1: float, y1: float) -> np.ndarray:
+    dx, dy = x1 - x0, y1 - y0
+    t = np.clip(((px - x0) * dx + (py - y0) * dy) / max(1e-9, dx * dx + dy * dy), 0, 1)
+    return np.hypot(px - (x0 + t * dx), py - (y0 + t * dy))
+
+
+def paint_markings(
+    img: np.ndarray,
+    road: np.ndarray,
+    ctx: Ctx,
+    spec: MaterialSpec,
+    ramp: dict[str, np.ndarray],
+    X: float,
+    Y: float,
+    half: float,
+) -> None:
+    """Markings on every straight road pixel of one material (connector legs and grid streets alike):
+    a stretch of road runs north-south where it hugs a vertical lattice line and continues beyond
+    its width both ways, east-west likewise; crossings stay clear. Dashes and sleepers are phased in
+    world pixels, so neighbouring tiles agree."""
+    dv, dh = _line_dist(ctx.wx, X), _line_dist(ctx.wy, Y)
+    o = int(math.ceil(half)) + 1
+
+    def cont(axis: int) -> np.ndarray:
+        return np.roll(road, o, axis=axis) & np.roll(road, -o, axis=axis)
+
+    vert = road & (dv <= half) & cont(0)
+    horiz = road & (dh <= half) & cont(1)
+    v, h = vert & ~horiz, horiz & ~vert
+    if spec.markings == "dashed":
+        edge = np.zeros_like(road)
+        for ax, sh in ((0, 1), (0, -1), (1, 1), (1, -1)):
+            edge |= ~np.roll(road, sh, axis=ax)
+        img[road & edge] = ramp["light"]  # kerbs
+        accent = _hex_rgb(spec.accent_color)
+        img[v & (dv < 0.5) & (np.mod(np.floor(ctx.wy), 6) < 3)] = accent
+        img[h & (dh < 0.5) & (np.mod(np.floor(ctx.wx), 6) < 3)] = accent
+    else:  # rails on sleepers
+        gauge = max(1.5, half * 0.6)
+        img[v & (dv < gauge + 1) & (np.mod(np.floor(ctx.wy), 3) < 1)] = ramp["dark"]
+        img[h & (dh < gauge + 1) & (np.mod(np.floor(ctx.wx), 3) < 1)] = ramp["dark"]
+        img[v & (np.abs(dv - gauge) < 0.5)] = ramp["hi"]
+        img[h & (np.abs(dh - gauge) < 0.5)] = ramp["hi"]
 
 
 def material_preview_png(
@@ -532,10 +875,10 @@ def material_preview_png(
         (Hex(1, -1), same),
         (Hex(2, 0), mixed),
     ):
-        rgb, levels = render_ground(
+        rgb, levels, fac = render_ground_full(
             tile_px=tile_px, biome=name, edges=edges, coord=(h.q, h.r), materials=mats
         )
-        rgb = relief_shade(rgb, levels, level_px=max(1, round(2 * tile_px / 64)))
+        rgb = relief_shade(rgb, levels, level_px=max(1, round(2 * tile_px / 64)), facade=fac)
         canvas = TileCanvas(h, tile_px)
         rgba = np.zeros((canvas.C, canvas.C, 4), np.uint8)
         m = canvas.mask()

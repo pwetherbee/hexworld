@@ -11,8 +11,7 @@ import {
   SURFACE_CELLS,
   levelAt,
   reliefGeometry,
-  reliefShader,
-  reliefShaderKey,
+  makeReliefMaterial,
   useLevels,
 } from "./relief";
 import { usePixelTexture } from "./textures";
@@ -89,6 +88,18 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
   const faceGeo = useMemo(() => tileFaceGeometry(tile.q, tile.r, P), [tile.q, tile.r, P]);
   const heightLayer = accepted ? tile.layers?.find((l) => l.kind === "height") : undefined;
   const levels = useLevels(heightLayer?.asset_id);
+  const facadeLayer = accepted ? tile.layers?.find((l) => l.kind === "facade") : undefined;
+  const facadeTex = usePixelTexture(facadeLayer?.asset_id);
+  const relief = useMemo(() => makeReliefMaterial(), []);
+  useEffect(() => () => relief.material.dispose(), [relief]);
+  useEffect(() => {
+    relief.material.map = tex;
+    relief.material.needsUpdate = true;
+  }, [relief, tex]);
+  useEffect(() => {
+    relief.uniforms.uFacade.value = facadeTex;
+    relief.uniforms.uFacadeOn.value = facadeTex ? 1 : 0;
+  }, [relief, facadeTex]);
   const reliefGeo = useMemo(
     () =>
       levels && heightLayer && texW && levels.C === texW
@@ -289,16 +300,8 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
         {accepted &&
           tex &&
           (reliefGeo ? (
-            <mesh key="relief" ref={reliefMesh} geometry={reliefGeo}>
-              {/* terraces extruded from the heightmap; unlit texture, walls shaded per vertex */}
-              <meshBasicMaterial
-                map={tex}
-                vertexColors
-                side={THREE.DoubleSide}
-                onBeforeCompile={reliefShader}
-                customProgramCacheKey={reliefShaderKey}
-              />
-            </mesh>
+            // terraces and buildings extruded from the heightmap; unlit texture, shaded walls, facades
+            <mesh key="relief" ref={reliefMesh} geometry={reliefGeo} material={relief.material} />
           ) : (
             <mesh key="flat" geometry={faceGeo} position={[0, TILE_HEIGHT + 0.002, 0]}>
               {/* unlit: the pixel art shows its exact colours */}
@@ -345,6 +348,8 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
   );
 });
 
+const MAX_LEAN = 1.0; // radians a sprite may lean back toward a high camera
+
 /** Upright sprite layer: cylindrical billboard, frame animation, procedural motion, pop-in. */
 function SpriteBillboard({
   layer,
@@ -386,8 +391,14 @@ function SpriteBillboard({
     const m = mesh.current;
     if (!g || !m) return;
     const t = clock.elapsedTime + phase;
-    // cylindrical billboard: rotate around Y to face the camera
-    g.rotation.y = Math.atan2(camera.position.x - (tileX + layer.x), camera.position.z - (tileZ + layer.y));
+    // billboard: turn around Y to face the camera, then lean back toward it (pivoting on the feet) so
+    // a steep, top-down camera still sees the sprite's face instead of a sliver
+    const dx = camera.position.x - (tileX + layer.x);
+    const dz = camera.position.z - (tileZ + layer.y);
+    g.rotation.order = "YXZ";
+    g.rotation.y = Math.atan2(dx, dz);
+    const pitch = Math.atan2(camera.position.y - top, Math.hypot(dx, dz));
+    g.rotation.x = -Math.min(MAX_LEAN, Math.max(0, pitch - 0.25) * 0.85);
     const started = !landedAt || Date.now() - landedAt > SPRITE_POP_DELAY + index * SPRITE_POP_STAGGER;
     const s = pop.current.step(started ? 1 : 0, dt, 260, 15);
     let sx = s;

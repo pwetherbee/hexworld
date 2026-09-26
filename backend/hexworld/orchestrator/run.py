@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import math
+import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -36,15 +37,24 @@ from hexworld.agents import artist, director
 from hexworld.agents import super as super_agent
 from hexworld.agents import tile as tile_agent
 from hexworld.agents.kit import AgentKit
-from hexworld.agents.llm import BudgetExceeded, RunBudget
+from hexworld.agents.llm import BudgetExceeded, RunBudget, estimate_image_cost
 from hexworld.agents.tile import TileAgent
 from hexworld.art.backend import ImageRequest
 from hexworld.art.composite import context_canvas, crop_target, neighborhood_png, render_region, to_png
-from hexworld.art.grid import TileCanvas
-from hexworld.art.layout import PropRequest, layout_props
+from hexworld.art.grid import TileCanvas, seam_delta
+from hexworld.art.layout import GroundOk, PropRequest, PropSlot, layout_props, relocate
+from hexworld.art.paint import (
+    PACK_MAX,
+    contact_sheet,
+    pack_frame,
+    pack_grid,
+    pixelize_sprite,
+    split_grid,
+    style_frame,
+)
 from hexworld.art.pixelize import PixelTile, crisp_tile, load_tile, pixelize_to_canvas
-from hexworld.art.procedural import fallback_material, ramp_hexes, render_ground
-from hexworld.art.relief import levels_to_png, load_levels, relief_shade
+from hexworld.art.procedural import fallback_material, ramp_hexes, render_ground_full
+from hexworld.art.relief import facade_codes, levels_to_png, load_heightmap, relief_shade, split_levels
 from hexworld.art.sprites import Placed, SpriteArt, flatten, preview_png, scatter_positions
 from hexworld.domain import (
     NO_COPY,
@@ -67,7 +77,7 @@ from hexworld.domain import (
     WorldHeader,
     WorldPlan,
 )
-from hexworld.domain.art import MaterialSpec, SpriteEntry, kind_key
+from hexworld.domain.art import MaterialSpec, PackItem, ScatterSpec, SpriteEntry, is_building_kind, kind_key
 from hexworld.hex import DIRECTION_NAMES, ORIGIN, Hex, opposite
 from hexworld.orchestrator.copies import apply_copy, copy_fits, resolve_root, sync_shallow_copies
 from hexworld.orchestrator.layout import Rasterized, rasterize
@@ -86,6 +96,18 @@ MAX_PROPS = 4  # agent-chosen props per tile (at most one of them a landmark)
 MAX_SPRITES = 6  # props + ambient scatter
 
 
+PACK_WINDOW_S = 1.2  # sprite requests arriving within this window share a pack
+AMBIENT_CHANCE = 0.35  # share of a terrain's tiles that get one of the director's ambient extras
+
+
+def _pack_free(n: int) -> int:
+    """Empty cells left on the sheets that will paint n sprites (the director may fill them)."""
+    if n < 3:
+        return 0  # small top-up packs stay small
+    # an image costs the same with 9 or 16 cells: grow the sheets toward full 4x4 packs
+    return max(0, min(8, -(-n // PACK_MAX) * PACK_MAX - n))
+
+
 @dataclass
 class Job:
     tile: Tile
@@ -95,6 +117,9 @@ class Job:
     feedback: str | None = None  # pending reviewer/validator feedback for the agent
     # edges neighbours were already built against while this tile was provisionally settled
     locked: dict[int, EdgeSpec] = field(default_factory=dict)
+    # grounds that failed only on seams: the procedural ground is deterministic, so the same ground
+    # again means the agent can't fix it (the engine's transition is as good as it gets): waive it
+    seam_grounds: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -152,6 +177,13 @@ class RunExecutor:
         self._inflight: dict[str, asyncio.Future] = {}  # single-flight library generation
         self._sprite_arts: dict[str, SpriteArt] = {}
         self._artists: dict[str, artist.SpriteArtist] = {}
+        # sprite packs: requests gather for a moment, then one director call + one image per <=16
+        self._pack_queue: dict[str, str] = {}
+        self._pack_timer: asyncio.TimerHandle | None = None
+        self._director: artist.SpriteDirector | None = None
+        self._revise_queue: dict[str, str] = {}
+        self._ambient: dict[str, list[ScatterSpec]] = {}  # terrain -> the director's extras
+        self._revise_timer: asyncio.TimerHandle | None = None
         self._material_artists: dict[str, artist.MaterialArtist] = {}
         self._material_revisions: dict[str, int] = defaultdict(int)
         self._material_version: dict[str, int] = defaultdict(int)
@@ -460,7 +492,27 @@ class RunExecutor:
             for c in e.connectors:
                 names[c] = True
         specs = await asyncio.gather(*[self._ensure_material(n, conn, parent) for n, conn in names.items()])
-        return {n: spec.model_dump() for n, spec in zip(names, specs, strict=True)}
+        out = {n: spec.model_dump() for n, spec in zip(names, specs, strict=True)}
+        # city grids are paved with the world's street connector, so grid streets and connector
+        # streets look the same and join up
+        roads = {n: self._grid_street(spec) for n, spec in zip(names, specs, strict=True)}
+        missing = {r for r in roads.values() if r and r not in out}
+        extra = await asyncio.gather(*[self._ensure_material(r, True, parent) for r in missing])
+        out.update({r: spec.model_dump() for r, spec in zip(missing, extra, strict=True)})
+        for n, road in roads.items():
+            if road:
+                out[n]["buildings"]["street_material"] = road
+        return out
+
+    def _grid_street(self, spec: MaterialSpec) -> str:
+        """The connector a built material's street grid is paved with ('' = the engine's asphalt)."""
+        b = spec.buildings
+        if b is None or b.street_grid <= 0:
+            return ""
+        vocab = self.world.spec.connector_vocabulary if self.world.spec else []
+        if b.street_material in vocab:
+            return b.street_material
+        return next((c for c in vocab if re.search(r"street|road|avenue|boulevard|lane", c)), "")
 
     async def _single_flight(self, key: str, make):
         """Concurrent requests for the same library item share one generation."""
@@ -502,7 +554,7 @@ class RunExecutor:
                 if spec is None:
                     sp.set(error="artist did not submit", fallback=True)
                     return fallback_material(name)
-                w.materials[name] = spec
+                w.materials[name] = self._with_ambient(name, spec)
                 assert w.style is not None
                 w.style.palette = _merge_palette(
                     w.style.palette, [*ramp_hexes(spec.base_color), spec.accent_color]
@@ -529,6 +581,18 @@ class RunExecutor:
         key = self._canonical_kind(kind)
         if key in w.sprites:
             return w.sprites[key]
+        if self._uses_packs():
+            try:
+                return await asyncio.shield(self._queue_pack(key, context))
+            except asyncio.CancelledError:
+                raise
+            except BudgetExceeded as e:
+                self._budget_error = e
+            except Exception as e:  # noqa: BLE001 - the tile simply goes without this prop
+                self.tracer.emit(
+                    "library.error", data={"sprite": key, "error": f"{type(e).__name__}: {e}"[:300]}
+                )
+            return None
 
         async def make() -> SpriteEntry | None:
             async with self.tracer.span("library.sprite", parent, kind=key) as sp:
@@ -547,40 +611,9 @@ class RunExecutor:
                     sp.set(error="artist did not submit")
                     return None
                 self._artists[key] = artist_agent
-                art = result["art"]
-                asset_id = self.store.put_asset(
-                    art.strip_png(), {"kind": "sprite", "sprite": key, "run_id": self.run.id}
-                )
-                entry = SpriteEntry(
-                    kind=key,
-                    program=result.get("program"),
-                    prompt=result.get("prompt"),
-                    asset_id=asset_id,
-                    px_w=art.w,
-                    px_h=art.h,
-                    frames=len(art.frames),
-                    fps=art.fps,
-                    motion=art.motion,
-                    run_id=self.run.id,
-                )
-                w.sprites[key] = entry
-                self._sprite_arts[asset_id] = art
-                self.store.put_world(w)
+                entry = self._publish_sprite(key, result["art"], result.get("prompt"), result.get("program"))
                 sp.set(
-                    asset_id=asset_id,
-                    size=[art.w, art.h],
-                    frames=len(art.frames),
-                    painted=bool(result.get("prompt")),
-                )
-                self.tracer.emit(
-                    "library.sprite_added",
-                    data={
-                        "kind": key,
-                        "asset_id": asset_id,
-                        "px_w": art.w,
-                        "px_h": art.h,
-                        "frames": len(art.frames),
-                    },
+                    asset_id=entry.asset_id, size=[entry.px_w, entry.px_h], painted=bool(result.get("prompt"))
                 )
                 return entry
 
@@ -593,6 +626,217 @@ class RunExecutor:
         except Exception as e:  # noqa: BLE001 - library failures never sink a run
             self.tracer.emit("library.error", data={"sprite": key, "error": f"{type(e).__name__}: {e}"[:300]})
         return None
+
+    def _publish_sprite(
+        self, key: str, art: SpriteArt, prompt: str | None, program: Any = None
+    ) -> SpriteEntry:
+        """A new sprite enters the world library (and the UI's library strip)."""
+        asset_id = self.store.put_asset(
+            art.strip_png(), {"kind": "sprite", "sprite": key, "run_id": self.run.id}
+        )
+        entry = SpriteEntry(
+            kind=key,
+            program=program,
+            prompt=prompt,
+            asset_id=asset_id,
+            px_w=art.w,
+            px_h=art.h,
+            frames=len(art.frames),
+            fps=art.fps,
+            motion=art.motion,
+            run_id=self.run.id,
+        )
+        self.world.sprites[key] = entry
+        self._sprite_arts[asset_id] = art
+        self.store.put_world(self.world)
+        self.tracer.emit(
+            "library.sprite_added",
+            data={"kind": key, "asset_id": asset_id, "px_w": art.w, "px_h": art.h, "frames": len(art.frames)},
+        )
+        return entry
+
+    # ------------------------------------------------------------------ sprite packs
+
+    def _uses_packs(self) -> bool:
+        return self.rt.painter is not None and self.s.sprite_packs
+
+    def _queue_pack(self, key: str, context: str, now: bool = False) -> asyncio.Future:
+        """Join (or start) the next sprite pack; resolves to the SpriteEntry (None if it failed)."""
+        fkey = f"s:{key}"
+        fut = self._inflight.get(fkey)
+        if fut is not None:
+            return fut
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        self._inflight[fkey] = fut
+        self._pack_queue[key] = context
+        if now or len(self._pack_queue) >= PACK_MAX:
+            self._flush_pack()
+        elif self._pack_timer is None:
+            self._pack_timer = loop.call_later(PACK_WINDOW_S, self._flush_pack)
+        return fut
+
+    def _flush_pack(self) -> None:
+        if self._pack_timer is not None:
+            self._pack_timer.cancel()
+            self._pack_timer = None
+        batch, self._pack_queue = self._pack_queue, {}
+        if batch:
+            self._background(self._paint_pack(batch))
+
+    async def _paint_pack(self, batch: dict[str, str]) -> None:
+        """One director call describes every sprite of the batch; the painter paints them in packs
+        of up to 16 per image (in parallel); cells that come back empty get one retry pack. Each
+        sprite is published as soon as its pack is cut, then the director reviews the pack once."""
+        keys = list(batch)
+        published: dict[str, SpriteEntry] = {}
+        items: dict[str, PackItem] = {}
+        async with self.tracer.span("library.sprite_pack", self._root, kinds=keys, count=len(keys)) as sp:
+            spans = {}
+            for k in keys:  # one span per sprite, so the UI and the traces see each one in flight
+                cm = self.tracer.span("library.sprite", sp, kind=k, pack=len(keys))
+                spans[k] = (cm, await cm.__aenter__())
+            try:
+                self._director = self._director or artist.SpriteDirector(self.kit, world=self.world)
+                items, extras = await self._director.direct(batch, sp, free=_pack_free(len(keys)))
+                ambient = self._accept_extras(extras)
+                for it in ambient:  # free cells of the sheet: ambient cast at no extra image cost
+                    items[it.kind] = it
+                    keys.append(it.kind)
+                    cm = self.tracer.span("library.sprite", sp, kind=it.kind, pack=len(keys), extra=True)
+                    spans[it.kind] = (cm, await cm.__aenter__())
+                if ambient:
+                    sp.set(extras=[it.kind for it in ambient])
+                arts = await self._paint_items(list(items.values()), sp)
+                retry = [items[k] for k in keys if arts.get(k) is None]
+                if retry:
+                    sp.set(retried=[it.kind for it in retry])
+                    arts.update(await self._paint_items(retry, sp))
+                for k in keys:
+                    art = arts.get(k)
+                    if art is not None:
+                        published[k] = self._publish_sprite(k, art, items[k].subject)
+                        if items[k].terrain:
+                            self._add_ambient(items[k].terrain, k)
+                        spans[k][1].set(asset_id=published[k].asset_id, size=[art.w, art.h], painted=True)
+                    else:
+                        spans[k][1].set(error="the pack came back without it")
+            except BudgetExceeded as e:
+                self._budget_error = e
+            except Exception as e:  # noqa: BLE001 - library failures never sink a run
+                sp.set(error=f"{type(e).__name__}: {e}"[:300])
+                self.tracer.emit(
+                    "library.error", data={"sprites": keys, "error": f"{type(e).__name__}: {e}"[:300]}
+                )
+            finally:
+                for k in keys:
+                    fut = self._inflight.pop(f"s:{k}", None)
+                    if fut is not None and not fut.done():
+                        fut.set_result(published.get(k))
+                    await spans[k][0].__aexit__(None, None, None)
+            sp.set(published=len(published))
+        if published and self.s.sprite_pack_review and self._director is not None:
+            self._background(self._review_pack(published, items))
+
+    def _accept_extras(self, extras: list[PackItem]) -> list[PackItem]:
+        """The director's extra ambient kinds: new, not buildings, on a known terrain."""
+        vocab = set(self.world.spec.terrain_vocabulary if self.world.spec else [])
+        out = []
+        for it in extras:
+            key = self._canonical_kind(it.kind)
+            if key in self._known_kinds() or is_building_kind(key) or it.terrain not in vocab:
+                continue
+            self._commissioned.add(key)
+            out.append(it.model_copy(update={"kind": key}))
+        return out
+
+    def _add_ambient(self, terrain: str, kind: str) -> None:
+        """Spread an ambient sprite over a terrain: a sparse scatter entry on its material (now, or
+        when the material is designed), kept across material revisions."""
+        entry = ScatterSpec(kind=kind, count=1, chance=AMBIENT_CHANCE)
+        self._ambient.setdefault(terrain, [])
+        if all(e.kind != kind for e in self._ambient[terrain]):
+            self._ambient[terrain].append(entry)
+        mat = self.world.materials.get(terrain)
+        if mat is not None:
+            self.world.materials[terrain] = self._with_ambient(terrain, mat)
+            self.store.put_world(self.world)
+
+    def _with_ambient(self, terrain: str, spec: MaterialSpec) -> MaterialSpec:
+        have = {s.kind for s in spec.scatter}
+        extra = [e for e in self._ambient.get(terrain, []) if e.kind not in have]
+        return spec.model_copy(update={"scatter": [*spec.scatter, *extra]}) if extra else spec
+
+    async def _paint_items(self, items: list[PackItem], parent: Span | None) -> dict[str, SpriteArt | None]:
+        style = self.world.style
+        raw = getattr(self.rt.painter, "painter", self.rt.painter)  # packs replace 2x2 sheet batching
+        n = len(items)
+        chunks = max(1, -(-n // PACK_MAX))
+        per = -(-n // chunks)  # even chunks: 18 -> 9 + 9, not 16 + 2
+
+        async def one(chunk: list[PackItem]) -> dict[str, SpriteArt | None]:
+            if len(chunk) == 1:
+                png, usage = await raw.paint(style_frame(style, chunk[0].subject))
+                cells: list[bytes | None] = [png]
+            else:
+                cols, rows = pack_grid(len(chunk))
+                png, usage = await raw.paint(pack_frame(style, [it.subject for it in chunk], cols, rows))
+                cells = await asyncio.to_thread(split_grid, png, cols, rows, len(chunk))
+            cost = estimate_image_cost(raw.model, usage)
+            self.kit.budget.charge_image(cost)
+            self.tracer.emit(
+                "image.painted",
+                data={
+                    "pack": [it.kind for it in chunk],
+                    "model": raw.model,
+                    "usage": usage,
+                    "cost_usd": round(cost, 6),
+                },
+            )
+            out: dict[str, SpriteArt | None] = {}
+            for it, cell in zip(chunk, cells, strict=True):
+                art = None
+                if cell is not None:
+                    try:
+                        art = pixelize_sprite(cell, it.size)
+                        art.motion = it.motion
+                    except ValueError:
+                        art = None
+                out[it.kind] = art
+            return out
+
+        results = await asyncio.gather(*[one(items[i : i + per]) for i in range(0, n, per)])
+        merged: dict[str, SpriteArt | None] = {}
+        for r in results:
+            merged.update(r)
+        return merged
+
+    async def _review_pack(self, published: dict[str, SpriteEntry], items: dict[str, PackItem]) -> None:
+        """The director looks at the pack at game scale once; up to 4 sprites are repainted together
+        and swapped into the library and every tile showing them."""
+        director = self._director
+        if director is None:
+            return
+        async with self.tracer.span("library.sprite_review", self._root, kinds=list(published)) as sp:
+            try:
+                kinds = list(published)
+                sheet = contact_sheet([self._sprite_art(published[k]) for k in kinds])
+                reps = await director.review(sheet, kinds, sp)
+                sp.set(repaint=[r.kind for r in reps])
+                if not reps:
+                    return
+                redo = [
+                    items[r.kind].model_copy(update={"subject": r.subject}) for r in reps if r.kind in items
+                ]
+                arts = await self._paint_items(redo, sp)
+                for it in redo:
+                    art = arts.get(it.kind)
+                    if art is not None:
+                        self._replace_sprite(it.kind, art, it.subject, None, sp)
+            except BudgetExceeded as e:
+                self._budget_error = e
+            except Exception as e:  # noqa: BLE001
+                sp.set(error=f"{type(e).__name__}: {e}"[:300])
 
     async def _render_copy_in_place(self, t: Tile, src: Tile) -> None:
         """Copy the design, not the pixels: re-render the ground at this tile's own world position
@@ -630,7 +874,29 @@ class RunExecutor:
         pix = await asyncio.to_thread(crisp_tile, res.png, canvas)
         ground_id = self.store.put_asset(pix.png, {"kind": "ground", "run_id": self.run.id})
         self._arrays[ground_id] = pix.rgba
-        height_id = self._height_asset(res.height_png, t, biome, t.edges, materials, P)
+        height_id, facade_id = self._relief_assets(res, t, biome, t.edges, materials, P)
+        sprites = [layer.model_copy() for layer in sprites]  # may be another tile's layers (copies)
+        probe = self._ground_probe(t, P, height_id)
+        if probe is not None and sprites:  # the ground under the props changed: re-seat them
+            slots = [
+                PropSlot(
+                    str(i),
+                    layer.x,
+                    layer.y,
+                    1.0,
+                    layer.width,
+                    layer.width * layer.px_h / max(1, layer.px_w),
+                    layer.role or "prop",
+                    "water" if layer.motion == "bob" else "land",
+                )
+                for i, layer in enumerate(sprites)
+            ]
+            seated = {int(sl.kind): sl for sl in relocate(slots, probe)[0]}
+            sprites = [
+                layer.model_copy(update={"x": seated[i].x, "y": seated[i].y})
+                for i, layer in enumerate(sprites)
+                if i in seated
+            ]
         placed = []
         for layer in sprites:
             art = self._sprite_arts.get(layer.asset_id) or SpriteArt.from_strip(
@@ -638,7 +904,7 @@ class RunExecutor:
             )
             self._sprite_arts[layer.asset_id] = art
             placed.append(Placed(layer.label, art, layer.x, layer.y, layer.width / (art.w / (P / 2.0))))
-        flat = flatten(self._shaded(pix.rgba, height_id), placed, canvas)
+        flat = flatten(self._shaded(pix.rgba, height_id, facade_id), placed, canvas)
         flat[~canvas.mask()] = 0
         flat_id = self.store.put_asset(to_png(Image.fromarray(flat, "RGBA")), {"kind": "tile_preview"})
         self._arrays[flat_id] = flat
@@ -646,7 +912,7 @@ class RunExecutor:
         t.asset_id = flat_id
         t.layers = [
             TileLayer(kind="ground", asset_id=ground_id, px_w=canvas.C, px_h=canvas.C),
-            TileLayer(kind="height", asset_id=height_id, px_w=canvas.C, px_h=canvas.C),
+            *self._relief_layers(height_id, facade_id, canvas.C),
             *[s.model_copy() for s in sprites],
         ]
         t.side_color = pix.side_color
@@ -688,7 +954,7 @@ class RunExecutor:
                 return
             if new is None:
                 return
-            self.world.materials[name] = new
+            self.world.materials[name] = new = self._with_ambient(name, new)
             self._material_version[name] += 1
             assert self.world.style is not None
             self.world.style.palette = _merge_palette(
@@ -723,6 +989,14 @@ class RunExecutor:
         old = self.world.sprites.get(key)
         if old is None:
             return
+        if self._uses_packs():
+            # notes arriving together (one review wave) are revised as one pack
+            self._revise_queue[key] = feedback
+            if self._revise_timer is None:
+                self._revise_timer = asyncio.get_running_loop().call_later(
+                    PACK_WINDOW_S * 2, self._flush_revisions
+                )
+            return
         artist_agent = self._artists.get(key) or artist.SpriteArtist(
             self.kit, world=self.world, kind=key, painter=self.rt.painter
         )
@@ -738,44 +1012,70 @@ class RunExecutor:
                 return
             if result is None:
                 return
-            art = result["art"]
-            asset_id = self.store.put_asset(
-                art.strip_png(), {"kind": "sprite", "sprite": key, "revision": True}
-            )
-            self._sprite_arts[asset_id] = art
-            entry = old.model_copy(
-                update={
-                    "program": result.get("program"),
-                    "prompt": result.get("prompt"),
-                    "asset_id": asset_id,
-                    "px_w": art.w,
-                    "px_h": art.h,
-                    "frames": len(art.frames),
-                    "fps": art.fps,
-                    "motion": art.motion,
-                }
-            )
-            self.world.sprites[key] = entry
-            self.store.put_world(self.world)
-            self.tracer.emit(
-                "library.sprite_added",
-                data={
-                    "kind": key,
-                    "asset_id": asset_id,
-                    "px_w": art.w,
-                    "px_h": art.h,
-                    "frames": len(art.frames),
-                    "revised": True,
-                },
-            )
-            swapped = 0
-            for t in self.tiles.values():
-                if t.status == TileStatus.accepted and any(
-                    layer.kind == "sprite" and layer.asset_id == old.asset_id for layer in t.layers
-                ):
-                    self._swap_sprite(t, old.asset_id, entry, art)
-                    swapped += 1
-            sp.set(asset_id=asset_id, tiles_updated=swapped)
+            self._replace_sprite(key, result["art"], result.get("prompt"), result.get("program"), sp)
+
+    def _flush_revisions(self) -> None:
+        self._revise_timer = None
+        notes, self._revise_queue = self._revise_queue, {}
+        if notes:
+            self._background(self._revise_pack(notes))
+
+    async def _revise_pack(self, notes: dict[str, str]) -> None:
+        async with self.tracer.span("library.sprite_revise", self._root, kinds=list(notes)) as sp:
+            try:
+                self._director = self._director or artist.SpriteDirector(self.kit, world=self.world)
+                items = await self._director.revise_many(notes, sp)
+                arts = await self._paint_items(items, sp) if items else {}
+                for it in items:
+                    art = arts.get(it.kind)
+                    if art is not None:
+                        self._replace_sprite(it.kind, art, it.subject, None, sp)
+                sp.set(revised=[it.kind for it in items if arts.get(it.kind) is not None])
+            except BudgetExceeded as e:
+                self._budget_error = e
+            except Exception as e:  # noqa: BLE001
+                sp.set(error=str(e)[:200])
+
+    def _replace_sprite(self, key: str, art: SpriteArt, prompt: str | None, program: Any, sp: Span) -> None:
+        """A revised sprite replaces the library entry and is swapped into every tile showing it."""
+        old = self.world.sprites.get(key)
+        if old is None:
+            return
+        asset_id = self.store.put_asset(art.strip_png(), {"kind": "sprite", "sprite": key, "revision": True})
+        self._sprite_arts[asset_id] = art
+        entry = old.model_copy(
+            update={
+                "program": program,
+                "prompt": prompt,
+                "asset_id": asset_id,
+                "px_w": art.w,
+                "px_h": art.h,
+                "frames": len(art.frames),
+                "fps": art.fps,
+                "motion": art.motion,
+            }
+        )
+        self.world.sprites[key] = entry
+        self.store.put_world(self.world)
+        self.tracer.emit(
+            "library.sprite_added",
+            data={
+                "kind": key,
+                "asset_id": asset_id,
+                "px_w": art.w,
+                "px_h": art.h,
+                "frames": len(art.frames),
+                "revised": True,
+            },
+        )
+        swapped = 0
+        for t in self.tiles.values():
+            if t.status == TileStatus.accepted and any(
+                layer.kind == "sprite" and layer.asset_id == old.asset_id for layer in t.layers
+            ):
+                self._swap_sprite(t, old.asset_id, entry, art)
+                swapped += 1
+        sp.set(asset_id=asset_id, tiles_updated=swapped)
 
     def _swap_sprite(self, t: Tile, old_asset: str, entry: SpriteEntry, art: SpriteArt) -> None:
         style = self.world.style
@@ -815,6 +1115,7 @@ class RunExecutor:
                 self._shaded(
                     self._array(t.ground_asset_id),
                     next((la.asset_id for la in t.layers if la.kind == "height"), None),
+                    next((la.asset_id for la in t.layers if la.kind == "facade"), None),
                 ),
                 placed,
                 canvas,
@@ -850,6 +1151,74 @@ class RunExecutor:
             },
             "materials": sorted(self.world.materials),
         }
+
+    def _ground_probe(self, t: Tile, P: int, height_id: str | None) -> GroundOk | None:
+        """Where sprites may stand. On land: streets, yards and plazas, not on buildings or in water;
+        floating things (boats) on water. The feet (the bottom rows under ~80% of the sprite's width)
+        must be on the right surface. None when the tile has neither buildings nor water."""
+        packed = self._levels(height_id)
+        if packed is None:
+            return None
+        codes = facade_codes(packed)
+        wet = split_levels(packed)[1]
+        if not codes.any() and not wet.any():
+            return None
+        canvas = TileCanvas(t.hex, P)
+        (cx, cy), (ox, oy), s_ = canvas.center, canvas.origin, canvas.s
+        mask = canvas.mask()
+        land = (codes == 0) & ~wet & mask
+        water = wet & mask
+        has_land, has_water = land.any(), water.any()
+        C = land.shape[0]
+
+        def ok(x: float, y: float, w: float, surface: str) -> bool:
+            # a floating prop on a tile without water (or a land prop on an all-water tile) just
+            # avoids buildings: better placed than dropped
+            want = water if (surface == "water" and has_water) or not has_land else land
+            j = int(cy + y * s_ - oy)
+            i0, i1 = int(cx + (x - w * 0.4) * s_ - ox), int(cx + (x + w * 0.4) * s_ - ox)
+            if j < 1 or j >= C or i0 < 0 or i1 >= C:
+                return False
+            return bool(want[j - 1 : j + 1, i0 : i1 + 1].all())
+
+        return ok
+
+    async def _recheck_seams(self, checks: CheckResult, pix: PixelTile, canvas: TileCanvas) -> None:
+        """A seam against a neighbour can be stale: a material revised mid-run repaints its tiles in
+        the background, so the stored neighbour may still show the old version. Re-render the
+        neighbour's ground with the current library (deterministic, cheap) and judge against that."""
+        seams = checks.metrics.get("seam_delta", {})
+        bad = [int(e) for e, d in seams.items() if d > self.s.max_seam_delta]
+        if not bad:
+            return
+        P = canvas.P
+        still = []
+        for e in bad:
+            nh = canvas.h.neighbor(e)
+            nt = self.tiles.get(nh)
+            if nt is None or not nt.edges or not nt.biome:
+                still.append(e)
+                continue
+            mats = await self._materials_for(nt.biome, nt.edges, None)
+            edges = [x.model_dump() for x in nt.edges]
+            rgb, _, _ = await asyncio.to_thread(
+                render_ground_full, tile_px=P, biome=nt.biome, edges=edges, coord=(nh.q, nh.r), materials=mats
+            )
+            fresh = await asyncio.to_thread(
+                crisp_tile, to_png(Image.fromarray(rgb, "RGB")), TileCanvas(nh, P)
+            )
+            d = seam_delta(pix.rgba, canvas, e, fresh.rgba, TileCanvas(nh, P))
+            seams[str(e)] = round(d, 4)
+            if d > self.s.max_seam_delta:
+                still.append(e)
+        names = {DIRECTION_NAMES[e] for e in bad if e not in still}
+        checks.failures = [f for f in checks.failures if not any(f"on the {n} edge" in f for n in names)]
+        checks.ok = not checks.failures
+        if names:
+            checks.metrics["seam_rechecked"] = sorted(names)
+
+    def _prop_scale(self) -> float:
+        return self.world.spec.prop_scale if self.world.spec else 1.0
 
     def sprite_entry(self, kind: str) -> tuple[SpriteEntry | None, bytes | None]:
         e = self.world.sprites.get(self._canonical_kind(kind))
@@ -888,11 +1257,18 @@ class RunExecutor:
             if pt.leave_empty or pt.duplicate.mode != "none":
                 continue
             for f in pt.features[:4]:
-                if f.strip():
+                if f.strip() and not is_building_kind(f):
                     title = w.spec.title if w.spec else ""
-                    self.commission_sprite_later(
-                        f, f"{f}: for a tile that is '{pt.intent}' ({pt.biome}), in {title}"
-                    )
+                    brief = f"{f}: for a tile that is '{pt.intent}' ({pt.biome}), in {title}"
+                    if self._uses_packs():
+                        key = self._canonical_kind(f)
+                        if key not in w.sprites:
+                            self._commissioned.add(key)
+                            self._queue_pack(key, brief)
+                    else:
+                        self.commission_sprite_later(f, brief)
+        if self._uses_packs():
+            self._flush_pack()  # the plan's whole cast in one go
 
     async def commission_sprite(self, kind: str, brief: str, q: int | None, r: int | None):
         entry = await self._ensure_sprite(kind, brief, self._root)
@@ -1012,6 +1388,7 @@ class RunExecutor:
         height_id: str,
         variant: int,
         parent: Span,
+        facade_id: str | None = None,
     ) -> tuple[list[TileLayer], np.ndarray]:
         """Ground + prop sprites (designed on demand) + ambient scatter from the biome's material,
         laid out by the engine so nothing overlaps or spills out of the hex."""
@@ -1026,6 +1403,8 @@ class RunExecutor:
         plain = bool(t.directive and t.directive.simplified)  # last-resort 'plain terrain' attempt
         if mat is not None and len(wanted) < MAX_SPRITES and not plain:
             for kind, x, y, sc in scatter_positions(mat.scatter, (t.q, t.r), variant):
+                if is_building_kind(kind):
+                    continue
                 if len(wanted) >= MAX_SPRITES:
                     break
                 wanted.append((kind, x, y, sc, f"ambient on {design.biome}", "scatter"))
@@ -1040,15 +1419,18 @@ class RunExecutor:
             arts[e.kind] = (e, art)
             if role == "prop" and art.h >= 30 and not landmark_taken:
                 role, landmark_taken = "landmark", True
-            reqs.append(PropRequest(e.kind, x, y, sc, art.w, art.h, role))
+            surface = "water" if e.motion == "bob" else "land"
+            reqs.append(PropRequest(e.kind, x, y, sc, art.w, art.h, role, surface))
         # sprites are sized against the 64px baseline: resolution changes the ground, not the props
-        slots, dropped = layout_props(reqs, SPRITE_BASE_PX)
+        slots, dropped = layout_props(
+            reqs, SPRITE_BASE_PX, self._prop_scale(), self._ground_probe(t, P, height_id)
+        )
         if dropped:
             parent.set(dropped=dropped)
         canvas = TileCanvas(t.hex, P)
         layers = [
             TileLayer(kind="ground", asset_id=ground_id, px_w=canvas.C, px_h=canvas.C),
-            TileLayer(kind="height", asset_id=height_id, px_w=canvas.C, px_h=canvas.C),
+            *self._relief_layers(height_id, facade_id, canvas.C),
         ]
         placed: list[Placed] = []
         for sl in sorted(slots, key=lambda sl: sl.y):
@@ -1070,7 +1452,7 @@ class RunExecutor:
                     role=sl.role,  # type: ignore[arg-type]
                 )
             )
-        flat = flatten(self._shaded(ground.rgba, height_id), placed, canvas)
+        flat = flatten(self._shaded(ground.rgba, height_id, facade_id), placed, canvas)
         flat[~canvas.mask()] = 0
         return layers, flat
 
@@ -1108,13 +1490,15 @@ class RunExecutor:
             sheet.alpha_composite(pnl, ((i % cols) * (w + 6), (i // cols) * (hgt + 6)))
         return to_png(sheet)
 
-    def _height_asset(
-        self, height_png: bytes | None, t: Tile, biome: str, edges: list[EdgeSpec], materials: dict, P: int
-    ) -> str:
-        """Relief layer: from the ground renderer when it provides one, otherwise computed from the
-        same materials (relief never depends on how the colours were produced)."""
+    def _relief_assets(
+        self, res: Any, t: Tile, biome: str, edges: list[EdgeSpec], materials: dict, P: int
+    ) -> tuple[str, str | None]:
+        """Relief layers: the heightmap (+ the facade layer when the tile has buildings), from the
+        ground renderer when it provides them, otherwise computed from the same materials (relief
+        never depends on how the colours were produced)."""
+        height_png, facade_png = getattr(res, "height_png", None), getattr(res, "facade_png", None)
         if height_png is None:
-            _, heights = render_ground(
+            _, heights, facade = render_ground_full(
                 tile_px=P,
                 biome=biome,
                 edges=[e.model_dump() for e in edges],
@@ -1122,25 +1506,37 @@ class RunExecutor:
                 materials=materials,
             )
             height_png = levels_to_png(heights)
-        asset_id = self.store.put_asset(height_png, {"kind": "height", "q": t.q, "r": t.r})
-        self._levels_cache[asset_id] = load_levels(height_png)
-        return asset_id
+            facade_png = to_png(Image.fromarray(facade, "RGB")) if facade_codes(heights).any() else None
+        height_id = self.store.put_asset(height_png, {"kind": "height", "q": t.q, "r": t.r})
+        self._levels_cache[height_id] = load_heightmap(height_png)
+        facade_id = None
+        if facade_png is not None:
+            facade_id = self.store.put_asset(facade_png, {"kind": "facade", "q": t.q, "r": t.r})
+        return height_id, facade_id
 
     def _levels(self, asset_id: str | None) -> np.ndarray | None:
         if not asset_id:
             return None
         lv = self._levels_cache.get(asset_id)
         if lv is None:
-            lv = load_levels(self.store.get_asset(asset_id))
+            lv = load_heightmap(self.store.get_asset(asset_id))
             self._levels_cache[asset_id] = lv
         return lv
 
-    def _shaded(self, ground: np.ndarray, height_id: str | None) -> np.ndarray:
-        """2D previews show relief as 3/4-view cliffs (the 3D view extrudes the heightmap instead)."""
+    def _shaded(self, ground: np.ndarray, height_id: str | None, facade_id: str | None = None) -> np.ndarray:
+        """2D previews show relief as 3/4-view walls (the 3D view extrudes the heightmap instead)."""
         lv = self._levels(height_id)
         if lv is None or lv.shape != ground.shape[:2]:
             return ground
-        return relief_shade(ground, lv, level_px=max(1, round(2 * (ground.shape[0] - 3) / 64)))
+        facade = self._array(facade_id)[..., :3] if facade_id else None
+        return relief_shade(ground, lv, level_px=max(1, round(2 * (ground.shape[0] - 3) / 64)), facade=facade)
+
+    @staticmethod
+    def _relief_layers(height_id: str, facade_id: str | None, C: int) -> list[TileLayer]:
+        layers = [TileLayer(kind="height", asset_id=height_id, px_w=C, px_h=C)]
+        if facade_id:
+            layers.append(TileLayer(kind="facade", asset_id=facade_id, px_w=C, px_h=C))
+        return layers
 
     # ================================================================== anchor bootstrap
 
@@ -1657,8 +2053,8 @@ class RunExecutor:
                     # procedural ground: texture is the material artist's call (it reviewed its own render)
                     min_distinct_colors=0 if res.meta.get("crisp") else self.s.min_distinct_colors,
                 )
-                if checks.ok and on_ground_ok is not None:
-                    on_ground_ok(design, pix)
+                if not checks.ok and res.meta.get("crisp"):
+                    await self._recheck_seams(checks, pix, canvas)
                 ground_id = self.store.put_asset(
                     pix.png,
                     {
@@ -1674,12 +2070,24 @@ class RunExecutor:
                     },
                 )
                 self._arrays[ground_id] = pix.rgba
-                height_id = self._height_asset(res.height_png, t, design.biome, design.edges, materials, P)
+                seam_only = bool(checks.failures) and all(
+                    f.startswith("visible seam") for f in checks.failures
+                )
+                if seam_only and res.meta.get("crisp"):
+                    if ground_id in job.seam_grounds:
+                        sp.set(seam_waived=checks.failures)
+                        checks.failures = []
+                        checks.ok = True
+                    else:
+                        job.seam_grounds.add(ground_id)
+                if checks.ok and on_ground_ok is not None:
+                    on_ground_ok(design, pix)
+                height_id, facade_id = self._relief_assets(res, t, design.biome, design.edges, materials, P)
 
                 # 5) layers: prop sprites + ambient scatter on top of the ground
                 async with self.tracer.span("tile.layers", sp) as lsp:
                     layers, flat = await self._compose_layers(
-                        design, t, pix, ground_id, height_id, variant, lsp
+                        design, t, pix, ground_id, height_id, variant, lsp, facade_id=facade_id
                     )
                     lsp.set(sprites=[layer.label for layer in layers if layer.kind == "sprite"])
                 flat_png = to_png(Image.fromarray(flat, "RGBA"))

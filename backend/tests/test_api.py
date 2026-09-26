@@ -45,3 +45,11 @@ def test_api_end_to_end_with_stream(make_runtime):
         evs = client.get(f"/api/runs/{run['id']}/events").json()
         assert evs[-1]["type"] == "run.completed"
         assert client.get("/api/schema").json()["title"] == "ApiSchemas"
+
+        # deleting a world removes it with its tiles, runs and events
+        assert client.delete(f"/api/worlds/{wid}").json() == {"deleted": True}
+        assert client.get(f"/api/worlds/{wid}").status_code == 404
+        assert wid not in [w["id"] for w in client.get("/api/worlds").json()]
+        assert not rt.store.list_tiles(wid) and not rt.store.list_runs(wid)
+        assert client.get(f"/api/runs/{run['id']}/events").json() == []
+        assert client.delete(f"/api/worlds/{wid}").status_code == 404

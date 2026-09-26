@@ -100,6 +100,14 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
             active_run_id=rt().active_run(world_id),
         )
 
+    @app.delete("/api/worlds/{world_id}")
+    async def delete_world(world_id: str) -> dict[str, bool]:
+        if rt().active_run(world_id):
+            raise HTTPException(409, "stop the world's active run before deleting it")
+        if not rt().store.delete_world(world_id):
+            raise HTTPException(404, "world not found")
+        return {"deleted": True}
+
     @app.get("/api/worlds/{world_id}/tiles/{q}/{r}")
     async def get_tile(world_id: str, q: int, r: int) -> TileDetail:
         store = rt().store

@@ -11,10 +11,13 @@ import { SQRT3, hexToWorld } from "./hexMath";
  * the way they face (light from the north-west, like the art).
  */
 
-export const LEVEL_STEP = 0.055; // world units per relief level (1 hex radius = 32 texels)
-const LEVEL_SCALE = 40; // heightmap PNG value per level
+export const LEVEL_STEP = 0.055; // world units per relief level (= one building floor)
+const LEGACY_SCALE = 40; // old heightmaps stored level * 40
+const FLAG_FORMAT = 64;
+const FLAG_LIQUID = 128;
 
-export type Levels = { C: number; data: Uint8Array; liquid: Uint8Array };
+/** Decoded heightmap: level per texel (up to 250: towers), liquid flag, building facade code. */
+export type Levels = { C: number; data: Uint8Array; liquid: Uint8Array; code: Uint8Array };
 
 const cache = new Map<string, Levels>();
 const pending = new Map<string, Promise<Levels>>();
@@ -29,13 +32,32 @@ async function loadLevels(id: string): Promise<Levels> {
   if (!ctx) throw new Error("no 2d context");
   ctx.drawImage(bmp, 0, 0);
   const px = ctx.getImageData(0, 0, bmp.width, bmp.height).data;
-  const data = new Uint8Array(bmp.width * bmp.height);
-  const liquid = new Uint8Array(bmp.width * bmp.height);
-  for (let k = 0; k < data.length; k++) {
-    data[k] = Math.round(px[k * 4] / LEVEL_SCALE);
-    liquid[k] = px[k * 4 + 1] > 127 && px[k * 4 + 2] < 64 ? 1 : 0; // G channel (grey = old format)
+  const n = bmp.width * bmp.height;
+  const data = new Uint8Array(n);
+  const liquid = new Uint8Array(n);
+  const code = new Uint8Array(n);
+  // format: R = level, G = flags (format marker | liquid), B = facade code (backend art/relief.py)
+  let modern = true;
+  for (let k = 0; k < n; k++) {
+    const g = px[k * 4 + 1];
+    if (!(g & FLAG_FORMAT) || g === 255) {
+      modern = false;
+      break;
+    }
   }
-  return { C: bmp.width, data, liquid };
+  for (let k = 0; k < n; k++) {
+    const r = px[k * 4];
+    const g = px[k * 4 + 1];
+    if (modern) {
+      data[k] = r;
+      liquid[k] = g & FLAG_LIQUID ? 1 : 0;
+      code[k] = px[k * 4 + 2];
+    } else {
+      data[k] = Math.round(r / LEGACY_SCALE);
+      liquid[k] = g > 127 && px[k * 4 + 2] < 64 ? 1 : 0;
+    }
+  }
+  return { C: bmp.width, data, liquid, code };
 }
 
 /** The heightmap for `id`, or null while it loads (never a previous id's levels). */
@@ -153,16 +175,24 @@ export function reliefGeometry(q: number, r: number, heightId: string, lv: Level
   const V = (z: number) => 1 - (cy + z * s - oy) / C;
 
   const W = (i: number, j: number) => (i < 0 || j < 0 || i >= C || j >= C ? 0 : lv.liquid[j * C + i]);
+  const K = (i: number, j: number) => (i < 0 || j < 0 || i >= C || j >= C ? 0 : lv.code[j * C + i]);
   const pos: number[] = [];
   const uv: number[] = [];
   const col: number[] = [];
   const wet: number[] = [];
+  const fac: number[] = []; // (is wall, world px along the wall, level, facade code)
+  const base: number[] = []; // level at the wall's foot (ground-floor shopfronts)
   let liquidNow = 0;
+  let wallNow: [number, number] = [0, 0]; // (facade code, foot level) of the wall being built
+  let alongAxis: "x" | "z" | null = null;
   const vert = (x: number, y: number, z: number, u: number, v: number, c: number) => {
     pos.push(x, y, z);
     uv.push(u, v);
     col.push(c, c, c);
     wet.push(liquidNow);
+    if (alongAxis) fac.push(1, alongAxis === "x" ? cx + x * s : cy + z * s, y / LEVEL_STEP, wallNow[0]);
+    else fac.push(0, 0, 0, 0);
+    base.push(wallNow[1]);
   };
   const quad = (
     a: [number, number, number],
@@ -235,7 +265,11 @@ export function reliefGeometry(q: number, r: number, heightId: string, lv: Level
             const u = (hiI + 0.5) / C;
             const v = 1 - (j + 0.5) / C;
             const shade = a > b ? 0.62 : 0.8; // faces east : faces west (lit)
+            alongAxis = "z";
+            wallNow = [K(hiI, j), Math.min(a, b)];
             quad([x, hi, za], [x, hi, zb], [x, lo, zb], [x, lo, za], u, v, shade, shade * 0.8);
+            alongAxis = null;
+            wallNow = [0, 0];
           }
         }
       }
@@ -254,7 +288,11 @@ export function reliefGeometry(q: number, r: number, heightId: string, lv: Level
             const u = (i + 0.5) / C;
             const v = 1 - (hiJ + 0.5) / C;
             const shade = a > c ? 0.58 : 0.72; // faces south (towards the usual camera) : north
+            alongAxis = "x";
+            wallNow = [K(i, hiJ), Math.min(a, c)];
             quad([xa, hi, z], [xb, hi, z], [xb, lo, z], [xa, lo, z], u, v, shade, shade * 0.72);
+            alongAxis = null;
+            wallNow = [0, 0];
           }
         }
       }
@@ -289,6 +327,8 @@ export function reliefGeometry(q: number, r: number, heightId: string, lv: Level
   g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
   g.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
   g.setAttribute("liquid", new THREE.Float32BufferAttribute(wet, 1));
+  g.setAttribute("facade", new THREE.Float32BufferAttribute(fac, 4));
+  g.setAttribute("wallBase", new THREE.Float32BufferAttribute(base, 1));
   g.computeBoundingSphere();
   if (geoCache.size > 3000) geoCache.clear();
   geoCache.set(key, g);
@@ -300,27 +340,94 @@ export const SURFACE_TIME = { value: 0 };
 /** Texels per tile canvas (tile_px + 3) of the open world, for texel-snapped surface effects. */
 export const SURFACE_CELLS = { value: 67 };
 
+export type ReliefUniforms = {
+  uFacade: { value: THREE.Texture | null };
+  uFacadeOn: { value: number };
+};
+
 /**
- * Relief material hook: liquid top faces get a slow, pixel-quantized shimmer (bands of +/- one
- * brightness step sweeping across the water, snapped to the texel grid so it stays pixel art).
+ * The relief material of one tile: unlit pixel art, walls shaded per vertex, plus
+ * - liquid top faces: a slow, pixel-quantized shimmer (texel-snapped bands sweeping across);
+ * - building walls: pixel-art facades drawn floor by floor (1 relief level = 1 floor) from the
+ *   building's wall colour (facade layer) and facade code (style, lit share): windows, lit or dark,
+ *   ground-floor shopfronts and floor lines, on a world-aligned pixel grid.
  */
-export function reliefShader(shader: THREE.WebGLProgramParametersWithUniforms): void {
-  shader.uniforms.uTime = SURFACE_TIME;
-  shader.uniforms.uCells = SURFACE_CELLS;
-  shader.vertexShader = shader.vertexShader
-    .replace("#include <common>", "#include <common>\nattribute float liquid;\nvarying float vLiquid;")
-    .replace("#include <uv_vertex>", "#include <uv_vertex>\nvLiquid = liquid;");
-  shader.fragmentShader = shader.fragmentShader
-    .replace("#include <common>", "#include <common>\nuniform float uTime;\nuniform float uCells;\nvarying float vLiquid;")
-    .replace(
-      "#include <map_fragment>",
-      `#include <map_fragment>
-      if (vLiquid > 0.5) {
-        vec2 cell = floor(vMapUv * uCells);
-        float band = sin(cell.x * 0.45 + cell.y * 0.8 - uTime * 1.8)
-                   + 0.6 * sin(cell.x * 1.3 - cell.y * 0.35 + uTime * 1.1);
-        diffuseColor.rgb *= 1.0 + 0.11 * step(1.2, band) - 0.05 * step(band, -1.25);
-      }`,
-    );
+export function makeReliefMaterial(): { material: THREE.MeshBasicMaterial; uniforms: ReliefUniforms } {
+  const uniforms: ReliefUniforms = { uFacade: { value: null }, uFacadeOn: { value: 0 } };
+  const material = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uTime = SURFACE_TIME;
+    shader.uniforms.uCells = SURFACE_CELLS;
+    shader.uniforms.uFacade = uniforms.uFacade;
+    shader.uniforms.uFacadeOn = uniforms.uFacadeOn;
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        "#include <common>",
+        "#include <common>\nattribute float liquid;\nattribute vec4 facade;\nattribute float wallBase;\n" +
+          "varying float vLiquid;\nvarying vec4 vFacade;\nvarying float vBase;",
+      )
+      .replace("#include <uv_vertex>", "#include <uv_vertex>\nvLiquid = liquid;\nvFacade = facade;\nvBase = wallBase;");
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "#include <common>",
+        `#include <common>
+        uniform float uTime;
+        uniform float uCells;
+        uniform sampler2D uFacade;
+        uniform float uFacadeOn;
+        varying float vLiquid;
+        varying vec4 vFacade;
+        varying float vBase;
+        float fhash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+        bool inside(float v, float lo, float hi) { return v >= lo && v < hi; }`,
+      )
+      .replace(
+        "#include <map_fragment>",
+        `#include <map_fragment>
+        if (vLiquid > 0.5) {
+          vec2 cell = floor(vMapUv * uCells);
+          float band = sin(cell.x * 0.45 + cell.y * 0.8 - uTime * 1.8)
+                     + 0.6 * sin(cell.x * 1.3 - cell.y * 0.35 + uTime * 1.1);
+          diffuseColor.rgb *= 1.0 + 0.11 * step(1.2, band) - 0.05 * step(band, -1.25);
+        }
+        if (vFacade.x > 0.5 && vFacade.w > 0.5 && uFacadeOn > 0.5) {
+          float code = floor(vFacade.w + 0.5);
+          float style = floor(code / 32.0);
+          float litShare = mod(code, 32.0) / 31.0;
+          vec3 wallc = texture2D(uFacade, vMapUv).rgb;
+          float ix = floor(vFacade.y);              // world pixel along the wall
+          float lvl = vFacade.z;                    // relief level = floor
+          float fl = floor(lvl + 0.001);
+          float sub = lvl - fl;                     // 0..1 within the floor
+          float rel = lvl - vBase;                  // height above the wall's foot
+          float c3 = mod(ix, 3.0), c4 = mod(ix, 4.0), c5 = mod(ix, 5.0), c6 = mod(ix, 6.0);
+          bool win = false;
+          vec3 glass = vec3(0.035, 0.05, 0.08);
+          if (rel < 1.0 && style != 6.0 && style != 5.0) {          // ground floor: shopfronts
+            win = inside(c6, 1.0, 5.0) && inside(sub, 0.12, 0.78);
+          } else if (style == 1.0) {                                   // punched
+            win = c3 == 1.0 && inside(sub, 0.3, 0.85);
+          } else if (style == 2.0) {                                   // glass curtain wall
+            win = c4 != 0.0 && sub > 0.14;
+            glass = mix(wallc, vec3(0.08, 0.15, 0.24), 0.65);
+          } else if (style == 3.0) {                                   // ribbon bands
+            win = c6 != 0.0 && inside(sub, 0.3, 0.8);
+          } else if (style == 4.0) {                                   // victorian: tall narrow bays
+            win = c4 == 1.0 && inside(sub, 0.15, 0.85);
+          } else if (style == 5.0) {                                   // industrial: sparse high rows
+            win = mod(fl, 2.0) == 1.0 && sub > 0.5 && inside(c5, 1.0, 4.0);
+          } else if (style == 6.0) {                                   // stone: rare slits
+            win = c6 == 2.0 && mod(fl, 3.0) == 1.0 && inside(sub, 0.3, 0.8);
+          }
+          vec3 col = wallc * (sub > 0.9 ? 0.86 : 1.0);                // floor lines / ledges
+          if (win) {
+            bool lit = fhash(vec2(ix + code * 7.0, fl * 1.7)) < (rel < 1.0 ? litShare + 0.3 : litShare);
+            col = lit ? vec3(1.0, 0.74, 0.36) : glass;
+          }
+          diffuseColor.rgb = col;
+        }`,
+      );
+  };
+  material.customProgramCacheKey = () => "hexworld-relief-v2";
+  return { material, uniforms };
 }
-export const reliefShaderKey = () => "hexworld-relief-v1";

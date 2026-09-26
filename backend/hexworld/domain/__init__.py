@@ -109,6 +109,17 @@ class WorldSpec(BaseModel):
     directional_notes: str = Field(
         description="General layout direction, e.g. 'mountains north, coast east'."
     )
+    prop_scale: float = Field(
+        default=1.0,
+        description="Size of every sprite relative to the tile, world-wide (0.3-1.5): 1 when a tile is a "
+        "landscape chunk or a room, ~0.5 when a tile is a city block (people and cars next to real "
+        "buildings), up to 1.3 for close-up interiors or board-game spaces.",
+    )
+
+    @field_validator("prop_scale")
+    @classmethod
+    def _prop_scale(cls, v: float) -> float:
+        return min(1.5, max(0.3, float(v or 1.0)))
 
     @field_validator("terrain_vocabulary", "connector_vocabulary")
     @classmethod
@@ -336,7 +347,11 @@ class WorldHeader(BaseModel):
     world: WorldSpec
     style: StyleGuide
     tile_attributes: list[AttributeDef]
-    origin_tile: PlannedTile = Field(description="The origin tile's plan (it starts building right away).")
+    origin_tile: PlannedTile | None = Field(
+        default=None,
+        description="The origin tile's plan (it starts building right away). If omitted, the origin "
+        "waits for the layout and takes its region's terrain.",
+    )
 
 
 class Directive(BaseModel):
@@ -422,7 +437,7 @@ class TileLayer(BaseModel):
     stand on it as upright billboards: side-view pixel art, optionally a horizontal strip of animation
     frames, plus a procedural motion the renderer applies."""
 
-    kind: Literal["ground", "height", "sprite"]
+    kind: Literal["ground", "height", "facade", "sprite"]
     asset_id: str
     label: str = ""
     x: float = 0.0  # tile-local, in hex circumradius units (east +)

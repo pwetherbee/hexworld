@@ -30,6 +30,7 @@ from hexworld.domain import (
     Region,
     ShapeSpec,
 )
+from hexworld.domain.art import is_building_kind
 from hexworld.hex import ORIGIN, Hex, opposite, within
 
 
@@ -178,6 +179,40 @@ def rasterize(
     }
     res.skipped_occupied = before - len(owner)
 
+    # stray fragments (a tile or two cut off by a void or a shape's rough outline) read as bugs;
+    # real islands are bigger or carry a landmark (an islet lighthouse)
+    comp_of: dict[Hex, int] = {}
+    comps: list[list[Hex]] = []
+    for h0 in owner:
+        if h0 in comp_of:
+            continue
+        comp, dq = [h0], deque([h0])
+        comp_of[h0] = len(comps)
+        while dq:
+            for n in dq.popleft().neighbors():
+                if n in owner and n not in comp_of:
+                    comp_of[n] = len(comps)
+                    comp.append(n)
+                    dq.append(n)
+        comps.append(comp)
+    main = next((c for c in comps if origin in c), [origin])
+    main_set = set(main)
+    for comp in comps:
+        if origin in comp:
+            continue
+        # a fragment one or two tiles off the main map was meant to be part of it (a headland, a
+        # lighthouse point): bridge the gap with the nearest region's terrain (often the sea)
+        a, b = min(((x, y) for x in comp for y in main), key=lambda p: p[0].distance(p[1]))
+        if a.distance(b) <= 3:
+            for h in hex_line(a, b):
+                if h not in owner and h.distance(ORIGIN) <= world_radius and h not in occupied:
+                    owner[h] = _nearest_region(h, {k: v for k, v in owner.items() if k in main_set})
+            res.notes.append(f"joined a detached {len(comp)}-tile fragment at {comp[0].q},{comp[0].r}")
+        elif len(comp) < 3 and not any(h in marks for h in comp):
+            for h in comp:
+                owner.pop(h)
+            res.notes.append(f"dropped a stray {len(comp)}-tile fragment at {comp[0].q},{comp[0].r}")
+
     # cap: landmarks first (with the tiles linking them to the origin), then breadth-first from
     # the origin (then any other component, nearest first)
     kept: set[Hex] = {origin}
@@ -239,7 +274,7 @@ def rasterize(
             pt = origin_tile.model_copy(update={"q": h.q, "r": h.r, "leave_empty": False})
             res.tiles.append(pt)
             continue
-        feats = list(lm.features) if lm else _scatter(reg, h)
+        feats = [f for f in lm.features if not is_building_kind(f)] if lm else _scatter(reg, h)
         biome = (lm.biome if lm and lm.biome else None) or reg.biome
         edge_hints = [
             EdgeHint(edge=i, terrain=biome, connectors=sorted(cs))
@@ -292,11 +327,14 @@ def _nearest_region(h: Hex, owner: dict[Hex, int]) -> int:
 
 
 def _scatter(reg: Region, h: Hex) -> list[str]:
-    if not reg.features or reg.feature_density <= 0:
+    feats = [f for f in reg.features if not is_building_kind(f)]
+    if not feats or reg.feature_density <= 0:
         return []
+    reg = reg.model_copy(update={"features": feats})
     roll = _hash(h.q, h.r, 3.3 + len(reg.name))
     if roll >= reg.feature_density:
         return []
-    n = 2 if reg.feature_density > 0.6 and _hash(h.q, h.r, 9.1) < 0.5 else 1
+    # busy regions get a little crowd; each tile a different slice of the region's cast
+    n = 1 + (reg.feature_density > 0.4) + (reg.feature_density > 0.75 and _hash(h.q, h.r, 9.1) < 0.6)
     start = int(_hash(h.q, h.r, 5.7) * len(reg.features))
     return [reg.features[(start + k) % len(reg.features)] for k in range(min(n, len(reg.features)))]

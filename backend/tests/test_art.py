@@ -270,3 +270,172 @@ def test_straight_connectors_run_straight():
     dark = (rgb.max(-1) < 60) & c.mask()
     rows = np.nonzero(dark.any(1))[0]
     assert dark.any() and rows.max() - rows.min() <= 12  # a straight E-W band, not a meander
+
+
+def test_buildings_rise_in_floors_with_facades_and_streets():
+    from hexworld.art.procedural import render_ground_full
+    from hexworld.art.relief import (
+        FACADE_STYLES,
+        facade_codes,
+        levels_to_png,
+        load_heightmap,
+        relief_shade,
+        split_levels,
+    )
+    from hexworld.domain.art import BuildingsSpec
+
+    towers = _mat([]).model_copy(
+        update={
+            "buildings": BuildingsSpec(
+                layout="towers",
+                lot_px=16,
+                street_grid=1,
+                floors_min=12,
+                floors_max=36,
+                wall_colors=["#7fa7c9", "#c8ccd2"],
+                roof_colors=["#6f747d"],
+                facade="glass",
+                roof="terrace",
+            )
+        }
+    )
+    rgb, packed, fac = render_ground_full(
+        tile_px=P,
+        biome="dt",
+        edges=[{"terrain": "dt", "connectors": []}] * 6,
+        coord=(1, -1),
+        materials={"dt": towers},
+    )
+    m = TileCanvas(Hex(1, -1), P).mask()
+    lv, liquid = split_levels(packed)
+    codes = facade_codes(packed)
+    built = codes > 0
+    assert built[m].mean() > 0.3 and (~built[m]).mean() > 0.1  # buildings and streets both present
+    assert lv[m].max() >= 12 and not liquid.any()  # tall towers, far above the old 0-4 range
+    assert ((codes[built] >> 5) == FACADE_STYLES.index("glass")).all()
+    assert fac[built].std() > 0  # wall colours painted
+    # the PNG round-trip keeps levels, facade codes and the liquid flag
+    assert (load_heightmap(levels_to_png(packed)) == packed).all()
+    shaded = relief_shade(rgb, packed, facade=fac)
+    assert shaded.shape == rgb.shape and not (shaded == rgb).all()
+
+
+def test_building_kinds_are_not_sprites():
+    from hexworld.domain.art import is_building_kind
+
+    for k in (
+        "house",
+        "Victorian Houses",
+        "brick_warehouse",
+        "glass skyscraper",
+        "old church",
+        "painted ladies",
+    ):
+        assert is_building_kind(k), k
+    for k in ("cable car", "street vendor", "apple tree", "windmill", "lighthouse", "fountain", "seagull"):
+        assert not is_building_kind(k), k
+
+
+def test_straight_connectors_form_a_square_grid_across_tiles():
+    ground = _mat([])
+    street = _mat([], edges="straight").model_copy(update={"base_color": "#202020", "markings": "dashed"})
+    mats = {"g": ground, "street": street}
+    a, b = Hex(0, 0), Hex(0, 0).neighbor(1)  # NE neighbour; the street crosses their shared edge
+    ea = [{"terrain": "g", "connectors": ["street"] if i == 1 else []} for i in range(6)]
+    eb = [{"terrain": "g", "connectors": ["street"] if i == 4 else []} for i in range(6)]
+    ra, _ = render_ground(tile_px=P, biome="g", edges=ea, coord=(a.q, a.r), materials=mats)
+    rb, _ = render_ground(tile_px=P, biome="g", edges=eb, coord=(b.q, b.r), materials=mats)
+    ca, cb = TileCanvas(a, P), TileCanvas(b, P)
+    # the edge midpoint in world pixels: both tiles pave the same horizontal run through it
+    (ax, ay), (bx, by) = ca.center, cb.center
+    mx, my = (ax + bx) / 2, (ay + by) / 2
+    for dx in (-3, 3):
+        i, j = ca.to_canvas(mx + dx, my)
+        k, l_ = cb.to_canvas(mx + dx, my)
+        on_a = ca.mask()[j, i] and ra[j, i].max() < 90
+        on_b = cb.mask()[l_, k] and rb[l_, k].max() < 90
+        assert on_a or on_b  # whichever tile owns the pixel paints road there
+    # and the leg leaves the centre going north (axis-aligned), not diagonally
+    i, j = ca.to_canvas(ax + 0.5, ay - P * 0.25)
+    assert ra[j, i].max() < 90
+
+
+def test_city_grids_share_one_street_lattice_across_districts():
+    from hexworld.art.procedural import lattice
+    from hexworld.domain.art import BuildingsSpec
+
+    def district(layout: str, grid: int):
+        b = BuildingsSpec(
+            layout=layout,
+            lot_px=12,
+            street_grid=grid,
+            street_material="street",
+            wall_colors=["#c0a080"],
+            roof_colors=["#a05040"],
+            facade="punched",
+        )
+        return _mat([], edges="straight").model_copy(update={"buildings": b, "base_color": "#b0b0b0"})
+
+    street = _mat([], edges="straight").model_copy(update={"base_color": "#101010"})
+    mats = {"rows": district("rows", 1), "towers": district("towers", 2), "street": street}
+    X, Y = lattice(P)
+    for h, biome in ((Hex(0, 0), "rows"), (Hex(1, 0), "towers")):
+        rgb, _ = render_ground(
+            tile_px=P,
+            biome=biome,
+            edges=[{"terrain": biome, "connectors": []}] * 6,
+            coord=(h.q, h.r),
+            materials=mats,
+        )
+        c = TileCanvas(h, P)
+        wx, wy = c.world_xy()
+        # the lattice line through both tile centres (y = 0) is paved in the street material
+        row = c.mask() & (np.abs(wy) < 1) & (np.abs(wx - h.to_pixel(P / 2)[0]) < P * 0.4)
+        assert row.sum() > 10 and (rgb[row].max(-1) < 60).mean() > 0.9
+        # and so is the vertical line through each centre (every district has streets on even lines)
+        col = c.mask() & (np.abs(wx - h.to_pixel(P / 2)[0]) < 1) & (np.abs(wy) < P * 0.4)
+        assert (rgb[col].max(-1) < 60).mean() > 0.9
+    assert X > 20 and Y > 20
+
+
+def test_elevation_rises_into_mountains_and_stays_continuous_across_edges():
+    from hexworld.art.relief import split_levels
+    from hexworld.hex import within
+
+    mats = {
+        "meadow": _mat([]).model_copy(update={"elevation": 1}),
+        "slope": _mat([]).model_copy(update={"elevation": 12, "base_color": "#707070"}),
+        "peak": _mat([]).model_copy(update={"elevation": 32, "base_color": "#f0f0f0"}),
+    }
+    rank = {"meadow": 0, "slope": 1, "peak": 2}
+
+    def biome(h: Hex) -> str:
+        return "peak" if h.r <= -1 else "slope" if h.r == 0 and h.q > 0 else "meadow"
+
+    hexes = list(within(Hex(0, 0), 2))
+    out, cv = {}, {}
+    for h in hexes:
+        b = biome(h)
+        # the contract: an edge's terrain is agreed by both sides (here: the higher of the two)
+        edges = [{"terrain": max(b, biome(h.neighbor(i)), key=rank.get), "connectors": []} for i in range(6)]
+        out[h] = split_levels(
+            render_ground(tile_px=P, biome=b, edges=edges, coord=(h.q, h.r), materials=mats)[1]
+        )[0]
+        cv[h] = TileCanvas(h, P)
+    assert max(int(out[h].max()) for h in hexes if biome(h) == "peak") >= 20  # real mountains
+    worst = 0.0
+    for h in hexes:
+        for e in range(3):
+            n = h.neighbor(e)
+            if n not in out:
+                continue
+            ca, cb = cv[h], cv[n]
+            (ax, ay), (bx, by) = ca.origin, cb.origin
+            x0, x1, y0, y1 = max(ax, bx), min(ax + ca.C, bx + cb.C), max(ay, by), min(ay + ca.C, by + cb.C)
+            sa = (slice(y0 - ay, y1 - ay), slice(x0 - ax, x1 - ax))
+            sb = (slice(y0 - by, y1 - by), slice(x0 - bx, x1 - bx))
+            near = ca.mask()[sa] & cb.mask()[sb]  # the pixels both canvases treat as their own rim
+            if near.any():
+                d = np.abs(out[h][sa].astype(int) - out[n][sb].astype(int))[near]
+                worst = max(worst, float(d.mean()))
+    assert worst < 2.0

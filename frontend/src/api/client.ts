@@ -39,6 +39,7 @@ export const api = {
   listWorlds: () => req<World[]>("GET", "/worlds"),
   createWorld: (name?: string, radius?: number) => req<World>("POST", "/worlds", { name, radius }),
   getWorld: (id: string) => req<WorldDetail>("GET", `/worlds/${id}`),
+  deleteWorld: (id: string) => req<{ deleted: boolean }>("DELETE", `/worlds/${id}`),
   getTile: (worldId: string, q: number, r: number) =>
     req<TileDetail>("GET", `/worlds/${worldId}/tiles/${q}/${r}`),
   startRun: (worldId: string, q: number, r: number, prompt: string, options: Partial<RunOptions>) =>

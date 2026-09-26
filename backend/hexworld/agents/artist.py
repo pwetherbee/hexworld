@@ -18,7 +18,7 @@ from hexworld.art.paint import pixelize_sprite, style_frame
 from hexworld.art.procedural import material_preview_png
 from hexworld.art.sprites import lint, preview_png, rasterize
 from hexworld.domain import World
-from hexworld.domain.art import MaterialSpec, SpriteProgram
+from hexworld.domain.art import MaterialSpec, PackItem, Repaint, SpriteProgram
 from hexworld.telemetry import Span
 
 MAX_RENDERS = 3
@@ -84,6 +84,7 @@ class MaterialArtist:
             },
             "material": self.name,
             "is_connector": self.is_connector,
+            "connectors": list(w.spec.connector_vocabulary) if w.spec else [],
         }
         self.renders = 0
         res = await self.handle.run([text_part(payload)], parent, max_calls=6)
@@ -222,3 +223,116 @@ class SpriteArtist:
         )
         res = await self.handle.run([text_part(msg)], parent, max_calls=6)
         return res if "art" in res else None
+
+
+class SpriteDirector:
+    """Art-directs sprite PACKS: one session describes many sprites in one call, reviews the painted
+    pack once, and takes later feedback on any of them. Replaces one artist session per sprite."""
+
+    def __init__(self, kit: AgentKit, *, world: World):
+        self.world = world
+        self.holder: dict[str, Any] = {}
+
+        def submit_pack(
+            items: list[PackItem], tool_context: ToolContext, extras: list[PackItem] | None = None
+        ) -> dict:
+            """Submit one item per requested kind (subject, size, motion), plus optional `extras`:
+            new ambient kinds for the pack's free cells, each with the `terrain` it lives on."""
+            try:
+                items = [coerce(PackItem, it) for it in items]
+                extras = [coerce(PackItem, it) for it in (extras or [])]
+            except (ValidationError, ValueError) as e:
+                return {"error": str(e)[:700]}
+            if not items:
+                return {"error": "give one item per kind"}
+            return submitted(tool_context, self.holder, items=items, extras=extras)
+
+        def submit_repaints(repaints: list[Repaint], tool_context: ToolContext) -> dict:
+            """Up to 4 sprites to repaint (with sharper subjects); an empty list if all read well."""
+            try:
+                repaints = [coerce(Repaint, r) for r in repaints][:4]
+            except (ValidationError, ValueError) as e:
+                return {"error": str(e)[:700]}
+            return submitted(tool_context, self.holder, repaints=repaints)
+
+        self.handle: AgentHandle = kit.agent(
+            name="sprite_director",
+            role="artist",
+            instruction=prompts.ARTIST_SPRITE_PACK,
+            tools=[submit_pack, submit_repaints],
+            holder=self.holder,
+            label="sprite director",
+        )
+
+    def _payload(self, kinds: dict[str, str], free: int = 0) -> dict[str, Any]:
+        w = self.world
+        extra = (
+            {
+                "free_cells": free,
+                "terrains": [t for t in (w.spec.terrain_vocabulary if w.spec else [])],
+            }
+            if free > 0
+            else {}
+        )
+        return {
+            **extra,
+            "task": "sprite_pack",
+            "world": {"title": w.spec.title, "theme": w.spec.theme} if w.spec else None,
+            "style_keywords": w.style.style_keywords if w.style else "",
+            "palette": (w.style.palette[:32] if w.style else []),
+            "already_painted": sorted(w.sprites)[:40],
+            "kinds": [{"kind": k, "appears": ctx[:160]} for k, ctx in kinds.items()],
+        }
+
+    async def direct(
+        self, kinds: dict[str, str], parent: Span | None, free: int = 0
+    ) -> tuple[dict[str, PackItem], list[PackItem]]:
+        """-> (one item per requested kind, extra ambient kinds for the free cells)."""
+        self.holder.pop("items", None)
+        self.holder.pop("extras", None)
+        res = await self.handle.run([text_part(self._payload(kinds, free))], parent, max_calls=3)
+        got = {it.kind: it for it in res.get("items", [])}
+        out: dict[str, PackItem] = {}
+        for k in kinds:  # the engine keeps the requested keys even if the model renames one
+            it = got.get(k) or next((v for kk, v in got.items() if kk.lower().strip() == k), None)
+            out[k] = (
+                it.model_copy(update={"kind": k}) if it else PackItem(kind=k, subject=k.replace("_", " "))
+            )
+        extras = [e for e in res.get("extras") or [] if e.kind.strip() and e.kind not in out][:free]
+        return out, extras
+
+    async def review(self, sheet_png: bytes, kinds: list[str], parent: Span | None) -> list[Repaint]:
+        self.holder.pop("repaints", None)
+        msg = (
+            "Here is the painted pack at game scale, left to right: "
+            + ", ".join(kinds)
+            + ". Call submit_repaints with the ones that don't read (max 4), or an empty list."
+        )
+        res = await self.handle.run([text_part(msg), image_part(sheet_png)], parent, max_calls=2)
+        return [r for r in res.get("repaints", []) if r.kind in kinds]
+
+    async def revise_many(self, notes: dict[str, str], parent: Span | None) -> list[PackItem]:
+        """Feedback on several sprites at once -> improved items (painted together as one pack)."""
+        self.holder.pop("items", None)
+        msg = (
+            "Feedback from the super agent on sprites as seen on the map:\n"
+            + "\n".join(f"- '{k}': {fb}" for k, fb in notes.items())
+            + "\nCall submit_pack with just these kinds, each improved."
+        )
+        res = await self.handle.run([text_part(msg)], parent, max_calls=2)
+        out = []
+        for it in res.get("items") or []:
+            k = next((kk for kk in notes if kk == it.kind or kk == it.kind.lower().strip()), None)
+            if k is not None:
+                out.append(it.model_copy(update={"kind": k}))
+        return out
+
+    async def revise(self, kind: str, feedback: str, parent: Span | None) -> PackItem | None:
+        self.holder.pop("items", None)
+        msg = (
+            f"Feedback from the super agent on the '{kind}' sprite as seen on the map: {feedback} "
+            f"Call submit_pack with just '{kind}', improved."
+        )
+        res = await self.handle.run([text_part(msg)], parent, max_calls=2)
+        items = res.get("items") or []
+        return items[0].model_copy(update={"kind": kind}) if items else None

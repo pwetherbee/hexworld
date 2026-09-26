@@ -65,6 +65,14 @@ img.pixel.big, .pixel.big { width: 104px; height: 104px; }
 .menu-item:hover { background: rgba(255, 255, 255, 0.05); color: var(--text); }
 .menu-item.active { color: var(--text); }
 .menu-item.accent { color: var(--accent); }
+.world-list { display: flex; flex-direction: column; max-height: min(60vh, 520px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; border-top: 1px solid var(--line); margin-top: 2px; padding-top: 2px; }
+.menu-row { display: flex; align-items: center; min-width: 0; }
+.menu-row .menu-item { flex: 1; min-width: 0; }
+.menu-delete { flex-shrink: 0; display: grid; place-items: center; min-width: 26px; height: 26px; padding: 0 6px; border: 0; border-radius: 7px; background: none; color: var(--muted); cursor: pointer; opacity: 0; transition: opacity 0.15s, background 0.15s, color 0.15s; font-size: 11px; }
+.menu-delete svg { width: 14px; height: 14px; }
+.menu-row:hover .menu-delete, .menu-delete:focus-visible, .menu-row.confirming .menu-delete { opacity: 1; }
+.menu-delete:hover, .menu-row.confirming .menu-delete { color: #fca5a5; background: rgba(248, 113, 113, 0.12); }
+@media (hover: none) { .menu-delete { opacity: 0.6; } }
 
 /* ---------------------------------------------------------------- controls (top-right) */
 .controls { position: absolute; top: 14px; right: 14px; z-index: 5; display: flex; align-items: center; gap: 2px; padding: 3px; background: var(--glass); border: 1px solid var(--line); border-radius: 18px; animation: rise-in 0.5s 0.08s var(--ease) both; transition: right 0.45s var(--ease); }

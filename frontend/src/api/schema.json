@@ -159,6 +159,128 @@
       "title": "AttributeDef",
       "type": "object"
     },
+    "BuildingsSpec": {
+      "description": "Buildings as terrain: the engine lays out footprints on the world pixel grid, raises each\nbuilding FLOOR_LEVELS relief levels per floor (in 3D they are real blocks with pixel-art facades),\npaints roofs into the ground and leaves the gaps (streets, alleys, yards) in the material's own\npattern. Use it for any built terrain: city blocks, row houses, villages, towers, castles, ports.",
+      "properties": {
+        "layout": {
+          "description": "blocks: staggered city blocks with alleys. rows: terraced/row houses side by side (Victorian streets, old towns). detached: houses with yards (suburbs, villages). towers: few large towers with plazas between (downtowns). compound: one big walled building per lot with a courtyard (castles, cloisters, warehouses).",
+          "enum": [
+            "blocks",
+            "rows",
+            "detached",
+            "towers",
+            "compound"
+          ],
+          "type": "string"
+        },
+        "lot_px": {
+          "default": 14,
+          "description": "Typical footprint size in pixels (6-40; a tile is ~55px).",
+          "type": "integer"
+        },
+        "gap_px": {
+          "default": 2,
+          "description": "Alley/yard width between buildings in pixels (1-8).",
+          "type": "integer"
+        },
+        "street_grid": {
+          "default": 1,
+          "description": "City streets on the world's shared street lattice, so they join up across tiles and districts: 0 = no street grid (villages, castles, estates), 1 = a street on every lattice line (dense blocks about half a tile wide), 2 = every other line (big blocks, a tile wide).",
+          "type": "integer"
+        },
+        "street_material": {
+          "default": "",
+          "description": "The world's street connector name (e.g. 'street') that the grid streets are paved with, so they look exactly like the connector streets; '' = plain asphalt.",
+          "type": "string"
+        },
+        "coverage": {
+          "default": 0.85,
+          "description": "Share of lots that hold a building (0.2-1).",
+          "type": "number"
+        },
+        "floors_min": {
+          "default": 2,
+          "description": "Floors of the lowest buildings (1-40).",
+          "type": "integer"
+        },
+        "floors_max": {
+          "default": 5,
+          "description": "Floors of the tallest buildings (1-60).",
+          "type": "integer"
+        },
+        "tall_share": {
+          "default": 0.1,
+          "description": "Share of buildings near floors_max (the skyline); the rest skew low.",
+          "type": "number"
+        },
+        "wall_colors": {
+          "description": "1-6 '#rrggbb' facade colours, varied per building.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "roof_colors": {
+          "description": "1-4 '#rrggbb' roof colours.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "facade": {
+          "description": "Window pattern drawn on the walls: punched (brick/plaster, a grid of windows), glass (curtain-wall towers), bands (office ribbon windows), victorian (tall narrow bays), industrial (sparse high windows), stone (castles, few slits).",
+          "enum": [
+            "punched",
+            "glass",
+            "bands",
+            "victorian",
+            "industrial",
+            "stone"
+          ],
+          "type": "string"
+        },
+        "lit": {
+          "default": 0.35,
+          "description": "Share of lit (warm) windows, 0-1 (night cities high).",
+          "type": "number"
+        },
+        "roof": {
+          "default": "flat",
+          "description": "flat, parapet (raised rim), gabled (a ridge), terrace (stepped).",
+          "enum": [
+            "flat",
+            "parapet",
+            "gabled",
+            "terrace"
+          ],
+          "type": "string"
+        },
+        "clutter": {
+          "default": 0.3,
+          "description": "Rooftop details (vents, water tanks), 0-1.",
+          "type": "number"
+        }
+      },
+      "required": [
+        "layout",
+        "lot_px",
+        "gap_px",
+        "street_grid",
+        "street_material",
+        "coverage",
+        "floors_min",
+        "floors_max",
+        "tall_share",
+        "wall_colors",
+        "roof_colors",
+        "facade",
+        "lit",
+        "roof",
+        "clutter"
+      ],
+      "title": "BuildingsSpec",
+      "type": "object"
+    },
     "Coord": {
       "properties": {
         "q": {
@@ -550,9 +672,24 @@
           ],
           "type": "string"
         },
+        "markings": {
+          "default": "none",
+          "description": "Connectors only: 'dashed' paints a road's dashed centre line and kerbs (streets, highways), 'rails' two rails with sleepers (railways, tram and cable-car lines), 'none' otherwise.",
+          "enum": [
+            "none",
+            "dashed",
+            "rails"
+          ],
+          "type": "string"
+        },
         "height": {
           "default": 1,
           "description": "Base relief level 0-4 (liquids 0, plains 1, hills 2, rock 3+).",
+          "type": "integer"
+        },
+        "elevation": {
+          "default": 0,
+          "description": "Large-scale rise in relief levels (0-40), grown by the engine as a smooth, ridged landform that blends into neighbouring terrains: 0 flat land and water, 2-5 rolling hills, 6-14 foothills and rocky slopes, 15-40 mountains and snow peaks (a level is ~1/18 of a tile's width). Cities on hills can use it too.",
           "type": "integer"
         },
         "height_ops": {
@@ -575,6 +712,18 @@
             "$ref": "#/$defs/ScatterSpec"
           },
           "type": "array"
+        },
+        "buildings": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BuildingsSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For BUILT terrain only: buildings raised out of this ground as 3D blocks. The material's own colours and ops then describe the streets/yards between them."
         }
       },
       "required": [
@@ -586,10 +735,13 @@
         "boundary",
         "block_style",
         "edges",
+        "markings",
         "height",
+        "elevation",
         "height_ops",
         "ops",
-        "scatter"
+        "scatter",
+        "buildings"
       ],
       "title": "MaterialSpec",
       "type": "object"
@@ -1000,11 +1152,17 @@
         "count": {
           "description": "Sprites per tile of this material (0-8).",
           "type": "integer"
+        },
+        "chance": {
+          "default": 1.0,
+          "description": "Share of this material's tiles that get it (0-1).",
+          "type": "number"
         }
       },
       "required": [
         "kind",
-        "count"
+        "count",
+        "chance"
       ],
       "title": "ScatterSpec",
       "type": "object"
@@ -1592,6 +1750,7 @@
           "enum": [
             "ground",
             "height",
+            "facade",
             "sprite"
           ],
           "type": "string"
@@ -1907,6 +2066,11 @@
         "directional_notes": {
           "description": "General layout direction, e.g. 'mountains north, coast east'.",
           "type": "string"
+        },
+        "prop_scale": {
+          "default": 1.0,
+          "description": "Size of every sprite relative to the tile, world-wide (0.3-1.5): 1 when a tile is a landscape chunk or a room, ~0.5 when a tile is a city block (people and cars next to real buildings), up to 1.3 for close-up interiors or board-game spaces.",
+          "type": "number"
         }
       },
       "required": [
@@ -1916,7 +2080,8 @@
         "lore",
         "terrain_vocabulary",
         "connector_vocabulary",
-        "directional_notes"
+        "directional_notes",
+        "prop_scale"
       ],
       "title": "WorldSpec",
       "type": "object"

@@ -44,6 +44,7 @@ class ImageResult:
     backend: str
     meta: dict[str, Any] = field(default_factory=dict)
     height_png: bytes | None = None  # relief levels on the tile canvas (procedural ground only)
+    facade_png: bytes | None = None  # building wall colours on the tile canvas (when it has buildings)
 
 
 class ImageBackend(Protocol):
@@ -78,20 +79,21 @@ class ProceduralBackend:
     async def generate(self, req: ImageRequest) -> ImageResult:
         if self.latency_s:
             await asyncio.sleep(self.latency_s * (0.6 + 0.8 * ((req.seed % 997) / 997)))
-        png, height_png = await asyncio.to_thread(self._render, req)
+        png, height_png, facade_png = await asyncio.to_thread(self._render, req)
         return ImageResult(
             png=png,
             backend=self.name,
             meta={"seed": req.seed, "framing": "canvas", "crisp": True},
             height_png=height_png,
+            facade_png=facade_png,
         )
 
-    def _render(self, req: ImageRequest) -> tuple[bytes, bytes]:
-        from hexworld.art.procedural import render_ground
-        from hexworld.art.relief import levels_to_png
+    def _render(self, req: ImageRequest) -> tuple[bytes, bytes, bytes | None]:
+        from hexworld.art.procedural import render_ground_full
+        from hexworld.art.relief import facade_codes, levels_to_png
 
         h = req.hints
-        rgb, heights = render_ground(
+        rgb, heights, facade = render_ground_full(
             tile_px=h["tile_px"],
             biome=h["biome"],
             edges=h["edges"],
@@ -102,7 +104,12 @@ class ProceduralBackend:
         big = np.repeat(np.repeat(rgb, up, 0), up, 1)
         buf = io.BytesIO()
         Image.fromarray(big, "RGB").save(buf, format="PNG")
-        return buf.getvalue(), levels_to_png(heights)
+        facade_png = None
+        if facade_codes(heights).any():
+            fbuf = io.BytesIO()
+            Image.fromarray(facade, "RGB").save(fbuf, format="PNG")
+            facade_png = fbuf.getvalue()
+        return buf.getvalue(), levels_to_png(heights), facade_png
 
 
 ProceduralStubBackend = ProceduralBackend  # backwards-compatible name

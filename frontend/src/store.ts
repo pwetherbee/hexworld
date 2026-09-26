@@ -53,6 +53,7 @@ interface State {
   init: () => Promise<void>;
   openWorld: (id: string) => Promise<void>;
   newWorld: () => Promise<void>;
+  deleteWorld: (id: string) => Promise<void>;
   refreshWorld: () => Promise<void>;
   startRun: (prompt: string, options: Partial<RunOptions>) => Promise<void>;
   cancelRun: () => Promise<void>;
@@ -146,6 +147,20 @@ export const useStore = create<State>((set, get) => ({
       libMaterials: detail.world.materials ?? {},
       libraryBusy: 0,
     });
+  },
+
+  deleteWorld: async (id) => {
+    try {
+      await api.deleteWorld(id);
+    } catch (e) {
+      set({ error: `Couldn't delete the world: ${(e as Error).message}` });
+      return;
+    }
+    const worlds = get().worlds.filter((w) => w.id !== id);
+    set({ worlds });
+    if (get().world?.id !== id) return;
+    if (worlds[0]) await get().openWorld(worlds[0].id);
+    else await get().newWorld();
   },
 
   newWorld: async () => {

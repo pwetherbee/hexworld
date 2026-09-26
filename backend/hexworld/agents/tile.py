@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, ValidationError, create_model
 from hexworld.agents import prompts
 from hexworld.agents.kit import AgentHandle, AgentKit, image_part, submitted, text_part
 from hexworld.domain import AttributeDef, Directive, EdgeSpec, PropSpec, TileDesign, World
+from hexworld.domain.art import is_building_kind
 from hexworld.telemetry import Span
 
 
@@ -167,6 +168,11 @@ class TileAgent:
             the sprite artist starts painting it from your brief (what it is, materials, colours,
             silhouette) and it is placed on your tile when ready: don't wait, submit your design
             with it listed in props."""
+            if is_building_kind(kind):
+                return {
+                    "error": f"'{kind}' is a building: buildings are part of the landscape (a built terrain), "
+                    "not sprites. Props are people, animals, vehicles, plants and small objects."
+                }
             entry, png = api.sprite_entry(kind)
             if entry is not None:
                 out: dict[str, Any] = {
@@ -188,6 +194,14 @@ class TileAgent:
                 )
             except ValidationError as e:
                 return {"error": str(e)[:700]}
+            built = [p.kind for p in d.props if is_building_kind(p.kind)]
+            if built:
+                return {
+                    "error": f"props {built} are buildings: buildings are part of the landscape, not sprites. "
+                    "Choose a built terrain (a biome/edge terrain whose material raises buildings, e.g. "
+                    "'victorian_rowhouses', 'harbour_warehouses') and keep props for people, animals, "
+                    "vehicles, plants and small objects."
+                }
             return submitted(tool_context, self.holder, design=d)
 
         submit_design.__signature__ = inspect.Signature(

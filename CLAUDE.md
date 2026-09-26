@@ -24,6 +24,25 @@
   `(floor(cx - s) - 1, floor(cy - s) - 1)` with size `P + 3`. The backend renderers, validators,
   compositor, `board/geometry.ts` (face UVs) and `board/relief.ts` all rely on it; change together.
   Ground PNGs carry a 2px bleed ring past the rim with alpha 254; `load_tile` strips it.
+- **One street lattice** (`art/procedural.py: lattice`): vertical lines through every tile-centre
+  column (x = i·√3/2·s), horizontal lines through every centre row and midway (y = j·0.75·s). Straight
+  connectors run on it (`straight_segments`: diagonal legs turn at right angles) and built materials'
+  street grids (`BuildingsSpec.street_grid`) are cut from it, paved with their `street_material`, so
+  every road joins up. Built districts are zoned by whole lattice blocks, but only blocks wholly
+  inside the hex: anything touching the rim follows the organic band rule, whose warp fades to zero
+  at the rim so both tiles sharing an edge agree. Keep new ground features seam-consistent the same
+  way (decide near the rim only from what both tiles know: the shared edge's terrain).
+- Relief = material `height` (0-4) + height ops + `elevation` (0-40 landform, blended ~5px across
+  terrains, ridged world-space noise, liquids flat) + buildings. `data/`-style checks: rendering
+  neighbours must agree on levels along shared edges (see `test_elevation_...`).
+- **Sprite packs** (with an image model): no per-sprite artists. Requests (plan cast, tile agents'
+  `request_prop`, reviewer feedback) queue for ~1s, then ONE `SpriteDirector` call describes the batch
+  and the painter paints up to 16 per image (`art/paint.py: pack_frame/split_grid`, blobs assigned to
+  cells by centroid). Free cells are filled with the director's ambient `extras`, spread over their
+  terrain as sparse material scatter (`ScatterSpec.chance`). The director reviews each pack once
+  (≤4 repaints, swapped into tiles). The per-sprite `SpriteArtist` remains for the DSL fallback.
+- Sprites stand on the right surface (`layout.GroundOk`): land props never on roofs or water,
+  floating ones (`motion == "bob"`) on water; sizes scale with the world's `prop_scale`.
 - Scheduling (`RunExecutor._grow/_job`): neighbouring *attempts* never overlap; a tile that passes the
   deterministic checks is provisionally settled (neighbours may start) while it is reviewed, and a
   rejected tile keeps the edges its neighbours were built against (`Job.locked`).

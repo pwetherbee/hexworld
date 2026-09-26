@@ -70,6 +70,20 @@ class Store:
         rows = self._db.execute("SELECT json FROM worlds").fetchall()
         return sorted((World.model_validate_json(r[0]) for r in rows), key=lambda w: -w.created_at)
 
+    def delete_world(self, world_id: str) -> bool:
+        """Remove a world with its tiles, runs, attempts and events (and the runs' JSONL mirrors).
+        Asset files are content-addressed and may be shared, so they stay on disk."""
+        with self._lock, self._db:
+            run_ids = [r[0] for r in self._db.execute("SELECT id FROM runs WHERE world_id=?", (world_id,))]
+            gone = self._db.execute("DELETE FROM worlds WHERE id=?", (world_id,)).rowcount > 0
+            self._db.execute("DELETE FROM tiles WHERE world_id=?", (world_id,))
+            self._db.execute("DELETE FROM events WHERE world_id=?", (world_id,))
+            self._db.execute("DELETE FROM runs WHERE world_id=?", (world_id,))
+            self._db.executemany("DELETE FROM attempts WHERE run_id=?", [(r,) for r in run_ids])
+        for r in run_ids:
+            (self.runs_dir / f"{r}.jsonl").unlink(missing_ok=True)
+        return gone
+
     # ------------------------------------------------------------------ tiles
     def put_tile(self, world_id: str, t: Tile) -> None:
         with self._lock, self._db:

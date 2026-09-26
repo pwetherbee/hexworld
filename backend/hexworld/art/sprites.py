@@ -137,6 +137,8 @@ def scatter_positions(scatter: list[ScatterSpec], coord: tuple[int, int], varian
     q, r = coord
     out: list[tuple[str, float, float, float]] = []
     for si, sp in enumerate(scatter):
+        if sp.chance < 1 and float(_hash(q * 3 + si, r * 5 - si, 23.0)) >= sp.chance:
+            continue  # sparse ambient life: only some of the material's tiles
         placed = 0
         for k in range(sp.count * 3):
             if placed >= sp.count:

@@ -25,6 +25,11 @@ export const IconPlus = () => (
     <path d="M12 5v14M5 12h14" />
   </svg>
 );
+export const IconTrash = () => (
+  <svg {...base}>
+    <path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12M9 7V4h6v3" />
+  </svg>
+);
 export const IconClose = () => (
   <svg {...base}>
     <path d="M18 6 6 18M6 6l12 12" />

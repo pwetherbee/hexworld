@@ -64,8 +64,10 @@ async def plan_world(
         except (ValidationError, ValueError) as e:
             return {"error": str(e)[:900]}
         o = header.origin_tile
-        if (o.q, o.r) != (origin.q, origin.r) or o.leave_empty:
-            return {"error": f"origin_tile must be the origin {origin.key} and not left empty"}
+        if o is not None and o.leave_empty:
+            return {"error": f"origin_tile must not be left empty: it is the clicked tile {origin.key}"}
+        if o is not None and (o.q, o.r) != (origin.q, origin.r):
+            header.origin_tile = o = o.model_copy(update={"q": origin.q, "r": origin.r})
         if "header" in state:
             return {"error": "the world is already submitted; now call submit_layout"}
         state["header"] = header
@@ -75,7 +77,7 @@ async def plan_world(
                     world=header.world,
                     style=header.style,
                     tile_attributes=header.tile_attributes,
-                    tiles=[header.origin_tile],
+                    tiles=[o] if o is not None else [],
                 )
             )
         return {"ok": "the origin is being built; now draw the map with submit_layout"}
@@ -150,7 +152,7 @@ async def plan_world(
     parts = [text_part(payload)]
     if nearby_png:
         parts += [text_part("The existing map next to the new area:"), image_part(nearby_png)]
-    res = await h.run(parts, parent, max_calls=8)
+    res = await h.run(parts, parent, max_calls=11)
     if "plan" not in res:
         raise AgentFailed("planner did not submit a valid plan")
     return res["plan"]
