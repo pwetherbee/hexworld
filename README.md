@@ -38,7 +38,7 @@ Every run is a collaboration between ADK agents with tools, each in its own pers
 
 | agent | tools | job |
 |---|---|---|
-| **super planner** | `submit_world`, `submit_tiles` | world spec, style, game-specific tile attributes and the origin tile first (the origin starts building at once), then the rest of the map plan (regions, features, copies) |
+| **super planner** | `submit_world`, `submit_layout` | world spec, style, game-specific tile attributes and the origin tile first (the origin starts building at once), then the map's layout: regions of shape primitives, landmarks and routes, within a max-tiles budget |
 | **super reviewer** | `zoom_candidate`, `submit_verdicts` | reviews candidates with vision; routes feedback to the tile agent, the material artist or the sprite artist |
 | **super director** | `view_map`, `list_pending`, `update_tiles`, `commission_sprite`, `redo_tile`, `finish` | checks in during the build and steers what hasn't been built yet |
 | **tile agent** (one per tile) | `view_surroundings`, `list_library`, `request_prop`, `submit_design` | designs its tile (biome, edges, connectors, up to 4 props) against its neighbours; revises in the same session when rejected |
@@ -78,10 +78,24 @@ that uses it.
   props (at most one landmark) plus ambient scatter are fitted by a layout engine
   (`art/layout.py`), so they stay inside the hex and don't overlap.
 
+## Shapes and scale
+
+The super draws the map's shape itself, within a **max tiles** budget. Its layout is a set of
+regions built from shape primitives (organic blobs, winding paths/bands, rectangles, hexagons;
+'void' regions carve out bays, courtyards and gaps), plus landmarks at specific tiles and connector
+routes through waypoints (`orchestrator/layout.py` rasterizes it). That yields long valleys,
+archipelagos, patchwork districts or floor plans, and planning cost grows with the number of
+regions, not tiles. Islands of a plan grow in parallel.
+
+A tile can be any scale: a stretch of countryside, a city block or a room. Built environments use
+their own material ops (`lots` of buildings with alleys, `rooms` with doorways, `checker`, `planks`,
+`bricks`) and straight-edged connectors for streets, canals and corridors; buildings and walls are
+raised ground, so the 3D relief turns them into blocks.
+
 ## How a run works
 
 ```
-prompt ─▶ super.plan (world + origin first, then the rest) ─▶ streaming growth ────▶ done
+prompt ─▶ super.plan (world + origin first, then the layout) ─▶ streaming growth ──▶ done
            world spec     a tile starts when it touches a settled tile and no
            style guide    neighbour is mid-attempt:
            tile schema      tile agent designs ─▶ materials/sprites on demand ─▶ render
