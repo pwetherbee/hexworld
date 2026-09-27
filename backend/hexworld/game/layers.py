@@ -12,7 +12,10 @@ import asyncio
 import time
 from typing import TYPE_CHECKING, Any
 
+from hexworld.art.grid import TileCanvas
 from hexworld.art.paint import pixelize_sprite, style_frame
+from hexworld.art.pixelize import crisp_tile
+from hexworld.art.procedural import render_ground_full
 from hexworld.art.scene import (
     PAINT_SIZE,
     SCENE_H,
@@ -29,18 +32,20 @@ from hexworld.domain import (
     RunOptions,
     Scene,
     SceneLayer,
+    SkirtTile,
     Tile,
     TileStatus,
     World,
 )
 from hexworld.domain.art import SpriteEntry
-from hexworld.hex import DIRECTION_NAMES
+from hexworld.hex import DIRECTION_NAMES, ORIGIN, Hex, ring
 from hexworld.telemetry import Tracer, new_id
 
 if TYPE_CHECKING:
     from hexworld.orchestrator.runtime import Runtime
 
 DEFAULT_RADIUS = 3
+SCENE_VERSION = 2  # 2: painted from a map of the surroundings and a described view
 AVATAR = "traveller"
 SCALE_NOTES = {
     1: "one tile is about a tenth of the overworld tile it lies in: a street corner, a clearing, a "
@@ -61,6 +66,7 @@ class Layers:
     def __init__(self, rt: Runtime):
         self.rt = rt
         self._inflight: dict[str, asyncio.Future] = {}
+        self._skirts: dict[tuple[str, int, int], list[SkirtTile]] = {}
 
     @property
     def store(self):
@@ -183,53 +189,168 @@ class Layers:
         )
         return await self.rt.start_run(child.id, 0, 0, prompt, opts)
 
+    # ------------------------------------------------------------------ the skirt around a region
+
+    SKIRT_RINGS = 2
+
+    async def skirt(self, world_id: str) -> list[SkirtTile]:
+        """Two rings of ground outside a region, continuing its rim terrain (and roads, rivers) so the
+        region blends into the surroundings the viewer draws around it. Cached per built state."""
+        world = self.store.get_world(world_id)
+        if world is None:
+            raise KeyError(world_id)
+        if world.parent is None:
+            return []
+        tiles = {t.hex: t for t in self.store.list_tiles(world_id) if t.status == TileStatus.accepted}
+        key = (world_id, len(tiles), len(world.materials))
+        if key not in self._skirts:
+            self._skirts[key] = await asyncio.to_thread(self._render_skirt, world, tiles)
+        return self._skirts[key]
+
+    def _render_skirt(self, world: World, tiles: dict[Hex, Tile]) -> list[SkirtTile]:
+        import io
+
+        from PIL import Image
+
+        R = world.radius
+        P = world.style.tile_px if world.style else 64
+        mats = world.materials
+        out: list[SkirtTile] = []
+        for k in range(1, self.SKIRT_RINGS + 1):
+            for h in ring(ORIGIN, R + k):
+                src = tiles.get(_toward_centre(h, R))
+                if src is None or not src.biome:
+                    continue
+                edges = []
+                for i in range(6):
+                    n = tiles.get(h.neighbor(i))
+                    if n is not None and n.edges:  # facing the region: match its rim exactly
+                        e = n.edges[(i + 3) % 6]
+                        edges.append({"terrain": e.terrain, "connectors": list(e.connectors)})
+                    else:
+                        edges.append({"terrain": src.biome, "connectors": []})
+                rgb, _, _ = render_ground_full(
+                    tile_px=P, biome=src.biome, edges=edges, coord=(h.q, h.r), materials=mats
+                )
+                buf = io.BytesIO()
+                Image.fromarray(rgb, "RGB").save(buf, format="PNG")
+                pix = crisp_tile(buf.getvalue(), TileCanvas(h, P))
+                asset = self.store.put_asset(
+                    pix.png, {"kind": "skirt", "world": world.id, "q": h.q, "r": h.r}
+                )
+                out.append(SkirtTile(q=h.q, r=h.r, ring=k, biome=src.biome, asset_id=asset))
+        return out
+
     # ------------------------------------------------------------------ looking at a tile
 
+    def _describe(self, world: World, t: Tile, own_elev: float) -> str:
+        """One neighbour as the viewer sees it: what it is, its landmarks, and whether it rises."""
+        text = _pretty(t.biome) + (f" ({t.summary.rstrip('.')})" if t.summary else "")
+        marks = [la.label for la in t.layers if la.kind == "sprite" and la.role == "landmark" and la.label]
+        if marks:
+            text += f", with {', '.join(marks[:2])}"
+        m = world.materials.get(t.biome or "")
+        if m is not None:
+            d = (m.elevation + m.height) - own_elev
+            if m.liquid:
+                text += ", open water"
+            elif d >= 8:
+                text += ", rising high above you"
+            elif d >= 3:
+                text += ", on higher ground"
+            elif d <= -3:
+                text += ", lower down"
+            if m.buildings is not None:
+                text += f", buildings of {m.buildings.floors_min}-{m.buildings.floors_max} floors"
+        return text
+
     def _place(self, world: World, tile: Tile) -> dict[str, Any]:
-        tiles = {t.hex: t for t in self.store.list_tiles(world.id)}
-        around = []
-        for i in range(6):
-            n = tiles.get(tile.hex.neighbor(i))
-            if n and n.biome and n.biome != tile.biome:
-                around.append(f"{_pretty(n.biome)} to the {DIRECTION_NAMES[i]}")
+        """What the painter needs to know: the spot itself and what the viewer sees from it looking
+        north (the map's up): ahead, left and right, further ahead, and the far horizon (for a region,
+        the overworld beyond it)."""
+        tiles = {t.hex: t for t in self.store.list_tiles(world.id) if t.status == TileStatus.accepted}
+        own = world.materials.get(tile.biome or "")
+        own_elev = (own.elevation + own.height) if own else 1
+        h = tile.hex
+        # hex directions: E=0, NE=1, NW=2, W=3, SW=4, SE=5; north is up, between NW and NE
+        view: dict[str, list[str]] = {"ahead": [], "left": [], "right": [], "beyond": [], "horizon": []}
+        for key, dirs in (("ahead", (2, 1)), ("left", (3,)), ("right", (0,))):
+            for i in dirs:
+                n = tiles.get(h.neighbor(i))
+                if n is not None and n.biome:
+                    view[key].append(self._describe(world, n, own_elev))
+        for dq, dr in ((0, -2), (1, -2), (2, -2)):
+            n = tiles.get(Hex(h.q + dq, h.r + dr))
+            if n is not None and n.biome:
+                view["beyond"].append(self._describe(world, n, own_elev))
+        if world.parent is not None:  # the overworld around the region, toward the north
+            ctx = world.parent.context
+            ptiles = {t.hex: t for t in self.store.list_tiles(world.parent.world_id)}
+            ph = Hex(world.parent.q, world.parent.r)
+            for i in (2, 1, 3, 0):
+                n = ptiles.get(ph.neighbor(i))
+                if n is not None and n.biome:
+                    view["horizon"].append(f"{self._describe(world, n, own_elev)} ({DIRECTION_NAMES[i]})")
+            region = f"{_pretty(ctx.get('biome'))} ({ctx.get('summary', '')})".strip()
+        else:
+            for dq, dr in ((0, -3), (1, -3), (2, -3), (-1, -2)):
+                n = tiles.get(Hex(h.q + dq, h.r + dr))
+                if n is not None and n.biome:
+                    view["horizon"].append(self._describe(world, n, own_elev))
+            region = world.spec.title if world.spec else ""
         sprites = [la.label for la in tile.layers if la.kind == "sprite" and la.label]
-        mats = world.materials
-        b = mats.get(tile.biome or "")
+        here = _pretty(tile.biome) + (f": {tile.summary.rstrip('.')}" if tile.summary else "")
+        if sprites:
+            here += f" (with {', '.join(sprites[:4])})"
         buildings = ""
-        if b is not None and b.buildings is not None:
-            bb = b.buildings
+        if own is not None and own.buildings is not None:
+            bb = own.buildings
             buildings = (
-                f"Buildings: {bb.layout} of {bb.floors_min}-{bb.floors_max} floors, {bb.facade} facades, "
+                f"Around you: {bb.layout} of {bb.floors_min}-{bb.floors_max} floors, {bb.facade} facades, "
                 f"{bb.roof} roofs."
             )
-        high = max((getattr(mats.get(e.terrain), "elevation", 0) for e in tile.edges or []), default=0)
-        own = getattr(b, "elevation", 0) if b else 0
-        relief = (
-            "The land rises steeply here (mountains or cliffs)."
-            if max(high, own) >= 15
-            else "Hilly ground."
-            if max(high, own) >= 5
-            else ""
-        )
-        region = ""
-        if world.parent is not None:
-            ctx = world.parent.context
-            region = f"{_pretty(ctx.get('biome'))} ({ctx.get('summary', '')})".strip()
         return {
             "biome": tile.biome or "",
-            "summary": tile.summary or "",
-            "landmarks": sprites,
+            "here": here,
             "buildings": buildings,
-            "relief": relief,
-            "around": around,
-            "region": region or (world.spec.title if world.spec else ""),
-            "near": [s for s in sprites if s][-3:],
+            "view": view,
+            "region": region,
+            "near": [x for x in sprites if x][-3:],
+            "landmarks": sprites,
             "sky": "a clear day",
         }
 
+    def _map_png(self, world: World, tile: Tile) -> bytes | None:
+        """A top-down map of the spot and two rings around it, the viewer's hex marked YOU."""
+        import io
+
+        from hexworld.art.composite import render_region
+        from hexworld.art.pixelize import load_tile
+
+        P = world.style.tile_px if world.style else 64
+        arrays = {}
+        for t in self.store.list_tiles(world.id):
+            if t.status == TileStatus.accepted and t.asset_id and t.hex.distance(tile.hex) <= 2:
+                png = self.store.get_asset(t.asset_id)
+                if png:
+                    arrays[t.hex] = load_tile(png)
+        if not arrays:
+            return None
+        img = render_region(
+            arrays,
+            tile_px=P,
+            scale=3,
+            labels={tile.hex: "YOU"},  # type: ignore[dict-item]
+            center=tile.hex,
+            extent_px=int(P * 4.6),
+        )
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="PNG")
+        return buf.getvalue()
+
     async def scene(self, world_id: str, q: int, r: int) -> Scene:
         existing = self.store.get_scene(world_id, q, r)
-        if existing is not None:
+        if existing is not None and existing.version >= SCENE_VERSION:
             return existing
         return await self._single_flight(
             f"scene:{world_id}:{q},{r}", lambda: self._paint_scene(world_id, q, r)
@@ -246,8 +367,20 @@ class Layers:
         painter = self._painter()
         layers: list[SceneLayer] = []
         if painter is not None:
+            ref = await asyncio.to_thread(self._map_png, world, tile)
+            if ref is not None and hasattr(painter, "paint_ref"):
+                back = painter.paint_ref(
+                    backdrop_prompt(world.style, place, with_map=True),
+                    [ref],
+                    size=PAINT_SIZE,
+                    background="opaque",
+                )
+            else:
+                back = painter.paint(
+                    backdrop_prompt(world.style, place), size=PAINT_SIZE, background="opaque"
+                )
             (bg, _), (fg, _) = await asyncio.gather(
-                painter.paint(backdrop_prompt(world.style, place), size=PAINT_SIZE, background="opaque"),
+                back,
                 painter.paint(
                     foreground_prompt(world.style, place), size=PAINT_SIZE, background="transparent"
                 ),
@@ -273,6 +406,7 @@ class Layers:
             layers=layers,
             fx=scene_fx(words),
             created_at=time.time(),
+            version=SCENE_VERSION,
         )
         self.store.put_scene(scene)
         return scene
@@ -325,3 +459,20 @@ class Layers:
         fresh.sprites[AVATAR] = entry
         self.store.put_world(fresh)
         return entry
+
+
+def _toward_centre(h: Hex, radius: int) -> Hex:
+    """The region tile nearest to a hex outside it, along the line to the centre (cube rounding)."""
+    d = h.distance(ORIGIN)
+    if d <= radius:
+        return h
+    t = radius / d
+    x, z = h.q * t, h.r * t
+    y = -x - z
+    rx, ry, rz = round(x), round(y), round(z)
+    dx, dy, dz = abs(rx - x), abs(ry - y), abs(rz - z)
+    if dx > dy and dx > dz:
+        rx = -ry - rz
+    elif dy <= dz:
+        rz = -rx - ry
+    return Hex(rx, rz)

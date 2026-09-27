@@ -33,6 +33,7 @@ export interface ApiSchemas {
   start_run: StartRun;
   enter_result: EnterResult;
   scene: Scene;
+  skirt_tile: SkirtTile;
   sprite_entry: SpriteEntry;
   create_world: CreateWorld;
 }
@@ -924,6 +925,7 @@ export interface Scene {
   layers: SceneLayer[];
   fx: string[];
   created_at: number;
+  version: number;
 }
 /**
  * This interface was referenced by `ApiSchemas`'s JSON-Schema
@@ -934,6 +936,20 @@ export interface SceneLayer {
   asset_id: string;
   px_w: number;
   px_h: number;
+}
+/**
+ * Ground just outside a region, continuing its rim terrain so the region blends into its
+ * surroundings (rendered by the engine alone, never planned or reviewed).
+ *
+ * This interface was referenced by `ApiSchemas`'s JSON-Schema
+ * via the `definition` "SkirtTile".
+ */
+export interface SkirtTile {
+  q: number;
+  r: number;
+  ring: number;
+  biome: string;
+  asset_id: string;
 }
 /**
  * This interface was referenced by `ApiSchemas`'s JSON-Schema

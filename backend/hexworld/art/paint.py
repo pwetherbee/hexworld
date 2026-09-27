@@ -94,6 +94,26 @@ class OpenAISpritePainter:
             r = await self._generate(prompt, size, background)
         return self._result(r)
 
+    async def paint_ref(
+        self, prompt: str, refs: list[bytes], size: str = "1024x1024", background: str = "transparent"
+    ) -> tuple[bytes, dict[str, int]]:
+        """Paint with reference images (e.g. a map of the place). Falls back to plain generation if
+        the model doesn't take references."""
+        async with self._sem:
+            try:
+                r = await self._client.images.edit(
+                    model=self.model,
+                    image=[(f"ref{i}.png", png, "image/png") for i, png in enumerate(refs)],
+                    prompt=prompt,
+                    size=size,
+                    quality=self.quality,
+                    background=background,
+                    n=1,
+                )
+            except Exception:  # noqa: BLE001 - no reference support: paint from the text alone
+                r = await self._generate(prompt, size, background)
+        return self._result(r)
+
     async def _generate(self, prompt: str, size: str = "1024x1024", background: str = "transparent") -> Any:
         return await self._client.images.generate(
             model=self.model,

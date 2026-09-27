@@ -21,6 +21,11 @@ async def test_entering_a_tile_builds_its_region_and_scenes_are_painted_once(mak
     again, none = await rt.layers.enter(world.id, 0, 0)
     assert again.id == child.id and none is None  # entering again reuses the layer
 
+    skirt = await rt.layers.skirt(child.id)  # the region's terrain continues two rings past its rim
+    assert len(skirt) == 6 * 3 + 6 * 4 and {s.ring for s in skirt} == {1, 2}
+    assert all(rt.store.get_asset(s.asset_id) for s in skirt)
+    assert await rt.layers.skirt(world.id) == []  # the overworld has no skirt
+
     scene = await rt.layers.scene(child.id, 1, 0)
     assert scene.layers and scene.layers[0].role == "backdrop"
     assert rt.store.get_asset(scene.layers[0].asset_id)

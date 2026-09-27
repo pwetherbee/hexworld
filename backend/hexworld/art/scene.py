@@ -49,30 +49,41 @@ def scene_fx(words: list[str]) -> list[str]:
     return [fx for fx, keys in FX_WORDS.items() if any(k in text for k in keys)][:3]
 
 
-def _place_text(place: dict[str, Any]) -> str:
-    parts = [place.get("summary") or place.get("biome", "").replace("_", " ")]
-    if place.get("landmarks"):
-        parts.append("Its features: " + ", ".join(place["landmarks"][:6]) + ".")
+def _view_text(place: dict[str, Any]) -> str:
+    """The place and what the viewer sees from it, looking north."""
+    parts = [f"You stand on {place.get('here', 'this place')}."]
     if place.get("buildings"):
         parts.append(place["buildings"])
-    if place.get("relief"):
-        parts.append(place["relief"])
-    if place.get("around"):
-        parts.append("Around it: " + "; ".join(place["around"][:4]) + ".")
+    view = place.get("view", {})
+    for key, label in (("ahead", "Straight ahead"), ("left", "To the left"), ("right", "To the right")):
+        if view.get(key):
+            parts.append(f"{label}: {'; '.join(view[key][:3])}.")
+    if view.get("beyond"):
+        parts.append(f"Further ahead: {'; '.join(view['beyond'][:3])}.")
+    if view.get("horizon"):
+        parts.append(f"Far on the horizon: {'; '.join(view['horizon'][:3])}.")
     if place.get("region"):
-        parts.append(f"It lies within {place['region']}.")
-    return " ".join(p for p in parts if p)
+        parts.append(f"All of this lies within {place['region']}.")
+    return " ".join(parts)
 
 
-def backdrop_prompt(style: Any, place: dict[str, Any]) -> str:
+def backdrop_prompt(style: Any, place: dict[str, Any], with_map: bool = False) -> str:
     keywords = getattr(style, "style_keywords", "") if style else ""
     palette = ", ".join((getattr(style, "palette", None) or [])[:16])
+    ref = (
+        "The image you are given is a top-down MAP of this spot and its surroundings (north is up; you "
+        "stand in the hexagon marked YOU, looking north). Follow it for what lies where: coastlines, "
+        "water, roads and paths, woods, buildings, landmarks, and the colours of the land. Do NOT paint "
+        "a map: paint what you would see standing there. "
+        if with_map
+        else ""
+    )
     return (
         "A wide, side-view 16-bit pixel art scene: the location screen of a top-down RPG, in the "
-        "tradition of Octopath Traveler, Terraria and SNES backgrounds. Seen from eye level, standing in "
-        f"this place: {_place_text(place)} Composition: the ground where the viewer stands fills the lower "
-        "third, the place's main features stand in the middle distance, its surroundings on the horizon, "
-        f"and sky above ({place.get('sky', 'a clear day')}). Depth by colour: farther is paler and bluer. "
+        "tradition of Octopath Traveler, Terraria and SNES backgrounds. " + ref + _view_text(place) + " "
+        "Composition: the ground where you stand fills the lower third, what lies ahead rises in the middle "
+        "distance, the far land on the horizon, and sky above "
+        f"({place.get('sky', 'a clear day')}). Depth by colour: farther is paler and bluer. "
         f"World palette: {palette}. {keywords}. Chunky, clearly visible pixels, crisp edges, bold readable "
         "shapes, rich but calm detail, no people in the foreground, no text, no UI, no frame or border."
     )
@@ -83,7 +94,7 @@ def foreground_prompt(style: Any, place: dict[str, Any]) -> str:
     near = ", ".join(place.get("near", [])[:4]) or "grass tufts, stones and small plants"
     return (
         "The FOREGROUND LAYER ONLY of a side-view 16-bit pixel art RPG location scene of "
-        f"{place.get('biome', 'this place').replace('_', ' ')}: {near}, very close to the viewer, framing "
+        f"{place.get('here', 'this place')}: {near}, very close to the viewer, framing "
         "the bottom edge and the two lower corners, no taller than a quarter of the image. Everything "
         "else is fully transparent: no sky, no background, no ground plane in the middle. "
         f"{keywords}. Chunky, clearly visible pixels, crisp edges, darker and more saturated than the "

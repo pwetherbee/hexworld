@@ -1,4 +1,4 @@
-import type { EnterResult, Run, RunOptions, Scene, SpriteEntry, TileDetail, World, WorldDetail } from "./types.gen";
+import type { EnterResult, Run, RunOptions, Scene, SkirtTile, SpriteEntry, TileDetail, World, WorldDetail } from "./types.gen";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -42,6 +42,7 @@ export const api = {
   deleteWorld: (id: string) => req<{ deleted: boolean }>("DELETE", `/worlds/${id}`),
   enterTile: (worldId: string, q: number, r: number, radius?: number) =>
     req<EnterResult>("POST", `/worlds/${worldId}/tiles/${q}/${r}/enter`, { radius }),
+  skirt: (worldId: string) => req<SkirtTile[]>("GET", `/worlds/${worldId}/skirt`),
   getScene: (worldId: string, q: number, r: number) => req<Scene>("GET", `/worlds/${worldId}/tiles/${q}/${r}/scene`),
   makeScene: (worldId: string, q: number, r: number) => req<Scene>("POST", `/worlds/${worldId}/tiles/${q}/${r}/scene`),
   avatar: (worldId: string) => req<SpriteEntry | null>("POST", `/worlds/${worldId}/avatar`),

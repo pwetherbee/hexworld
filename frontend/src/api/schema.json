@@ -1269,6 +1269,10 @@
         },
         "created_at": {
           "type": "number"
+        },
+        "version": {
+          "default": 1,
+          "type": "integer"
         }
       },
       "required": [
@@ -1279,7 +1283,8 @@
         "caption",
         "layers",
         "fx",
-        "created_at"
+        "created_at",
+        "version"
       ],
       "title": "Scene",
       "type": "object"
@@ -1404,6 +1409,35 @@
         "frames"
       ],
       "title": "ShapeOp",
+      "type": "object"
+    },
+    "SkirtTile": {
+      "description": "Ground just outside a region, continuing its rim terrain so the region blends into its\nsurroundings (rendered by the engine alone, never planned or reviewed).",
+      "properties": {
+        "q": {
+          "type": "integer"
+        },
+        "r": {
+          "type": "integer"
+        },
+        "ring": {
+          "type": "integer"
+        },
+        "biome": {
+          "type": "string"
+        },
+        "asset_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "q",
+        "r",
+        "ring",
+        "biome",
+        "asset_id"
+      ],
+      "title": "SkirtTile",
       "type": "object"
     },
     "SpriteEntry": {
@@ -2298,6 +2332,9 @@
     "scene": {
       "$ref": "#/$defs/Scene"
     },
+    "skirt_tile": {
+      "$ref": "#/$defs/SkirtTile"
+    },
     "sprite_entry": {
       "$ref": "#/$defs/SpriteEntry"
     },
@@ -2315,6 +2352,7 @@
     "start_run",
     "enter_result",
     "scene",
+    "skirt_tile",
     "sprite_entry",
     "create_world"
   ],

@@ -14,8 +14,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from hexworld.config import REPO_ROOT, get_settings
-from hexworld.domain import Attempt, Run, RunOptions, Scene, Tile, World
+from hexworld.domain import Attempt, Run, RunOptions, Scene, SkirtTile, Tile, World
 from hexworld.domain.art import SpriteEntry
+from hexworld.game.layers import SCENE_VERSION
 from hexworld.orchestrator.runtime import RunConflict, Runtime
 from hexworld.telemetry import Event
 
@@ -69,6 +70,7 @@ class ApiSchemas(BaseModel):
     start_run: StartRun
     enter_result: EnterResult
     scene: Scene
+    skirt_tile: SkirtTile
     sprite_entry: SpriteEntry
     create_world: CreateWorld
 
@@ -126,10 +128,18 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
             raise HTTPException(409, str(e)) from e
         return EnterResult(world=world, run=run)
 
+    @app.get("/api/worlds/{world_id}/skirt")
+    async def skirt(world_id: str) -> list[SkirtTile]:
+        """Ground rings just outside a region, continuing its rim (engine-rendered)."""
+        try:
+            return await rt().layers.skirt(world_id)
+        except KeyError as e:
+            raise HTTPException(404, "world not found") from e
+
     @app.get("/api/worlds/{world_id}/tiles/{q}/{r}/scene")
     async def get_scene(world_id: str, q: int, r: int) -> Scene:
         scene = rt().store.get_scene(world_id, q, r)
-        if scene is None:
+        if scene is None or scene.version < SCENE_VERSION:  # none yet, or painted by an older recipe
             raise HTTPException(404, "no scene yet")
         return scene
 

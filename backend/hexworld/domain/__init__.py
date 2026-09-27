@@ -500,6 +500,17 @@ class SceneLayer(BaseModel):
     px_h: int
 
 
+class SkirtTile(BaseModel):
+    """Ground just outside a region, continuing its rim terrain so the region blends into its
+    surroundings (rendered by the engine alone, never planned or reviewed)."""
+
+    q: int
+    r: int
+    ring: int  # 1 = right outside the rim
+    biome: str
+    asset_id: str
+
+
 class Scene(BaseModel):
     """A tile seen up close: a layered, animated pixel-art picture of the spot."""
 
@@ -511,6 +522,7 @@ class Scene(BaseModel):
     layers: list[SceneLayer]
     fx: list[str] = Field(default_factory=list)  # ambient effects the viewer animates (water, leaves, ...)
     created_at: float
+    version: int = 1  # scenes painted by an older recipe are repainted on request
 
 
 class World(BaseModel):
