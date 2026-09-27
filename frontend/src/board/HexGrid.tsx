@@ -1,6 +1,7 @@
 import { type ThreeEvent, useFrame } from "@react-three/fiber";
 import { useMemo, useRef } from "react";
 import * as THREE from "three";
+import { usePlay } from "../play";
 import { useStore } from "../store";
 import { rig } from "./cameraRig";
 import { hexKey, hexToWorld, parseKey, worldToHex } from "./hexMath";
@@ -134,6 +135,10 @@ export function HexGrid() {
       onClick={(e) => {
         if (e.delta > 5) return; // that was a drag
         const k = keyOf(e);
+        if (usePlay.getState().active) {
+          usePlay.getState().click(k);
+          return;
+        }
         const s = useStore.getState();
         const tile = s.tiles[k];
         if ((!tile || FREE.has(tile.status)) && !s.activeRunId) s.setPromptTarget(parseKey(k));

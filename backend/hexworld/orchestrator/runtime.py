@@ -97,6 +97,9 @@ class Runtime:
         self.gpu_sem = asyncio.Semaphore(settings.image_concurrency)
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.shutting_down = False
+        from hexworld.game.layers import Layers
+
+        self.layers = Layers(self)
 
     # ------------------------------------------------------------------ worlds
     def create_world(self, name: str | None = None, radius: int | None = None) -> World:

@@ -43,6 +43,11 @@
   (≤4 repaints, swapped into tiles). The per-sprite `SpriteArtist` remains for the DSL fallback.
 - Sprites stand on the right surface (`layout.GroundOk`): land props never on roofs or water,
   floating ones (`motion == "bob"`) on water; sizes scale with the world's `prop_scale`.
+- **Layers and play** (`game/layers.py`, `frontend/src/play.ts`): the overworld is depth 0. Entering a
+  tile creates a child `World` (`parent` link, `depth`, `scale_note`; same style, finer terrains) and
+  builds it as a full hexagon (`RunOptions.fill_radius`); links live in the `drills` table, scenes in
+  `scenes` (never on Tile/World records, which running executors overwrite). Scenes are painted
+  backdrop + transparent foreground reduced to 384x256 and animated client-side (`ui/Play.tsx`).
 - Scheduling (`RunExecutor._grow/_job`): neighbouring *attempts* never overlap; a tile that passes the
   deterministic checks is provisionally settled (neighbours may start) while it is reviewed, and a
   rejected tile keeps the edges its neighbours were built against (`Job.locked`).

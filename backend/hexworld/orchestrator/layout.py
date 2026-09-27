@@ -148,6 +148,7 @@ def rasterize(
     world_radius: int,
     occupied: set[Hex],
     connectors: set[str],
+    fill_radius: bool = False,
 ) -> Rasterized:
     res = Rasterized(tiles=[])
     owner: dict[Hex, int] = {}  # tile -> region index
@@ -169,6 +170,12 @@ def rasterize(
     # the origin is always part of the plan
     if origin not in owner:
         owner[origin] = _nearest_region(origin, owner)
+
+    if fill_radius and owner:  # a drilled layer is a whole hexagon: gaps take the nearest region
+        painted = dict(owner)
+        for h in within(ORIGIN, world_radius):
+            if h not in owner:
+                owner[h] = _nearest_region(h, painted)
 
     # drop what can't be built
     before = len(owner)

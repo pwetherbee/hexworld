@@ -484,11 +484,43 @@ class Tile(BaseModel):
         return f"{self.q},{self.r}"
 
 
+class ParentLink(BaseModel):
+    """A drilled layer: this world is the inside of one tile of its parent world."""
+
+    world_id: str
+    q: int
+    r: int
+    context: dict[str, Any] = Field(default_factory=dict)  # the parent tile as the planner sees it
+
+
+class SceneLayer(BaseModel):
+    role: Literal["backdrop", "foreground"]
+    asset_id: str
+    px_w: int
+    px_h: int
+
+
+class Scene(BaseModel):
+    """A tile seen up close: a layered, animated pixel-art picture of the spot."""
+
+    world_id: str
+    q: int
+    r: int
+    title: str
+    caption: str
+    layers: list[SceneLayer]
+    fx: list[str] = Field(default_factory=list)  # ambient effects the viewer animates (water, leaves, ...)
+    created_at: float
+
+
 class World(BaseModel):
     id: str
     name: str
     radius: int
     created_at: float
+    parent: ParentLink | None = None  # set for drilled layers
+    depth: int = 0  # 0 = the overworld
+    scale_note: str = ""  # what one tile is at this depth (for planners and artists)
     spec: WorldSpec | None = None
     style: StyleGuide | None = None
     tile_attributes: list[AttributeDef] = Field(default_factory=list)
@@ -509,6 +541,9 @@ class RunOptions(BaseModel):
         default=None,
         description="Ground texture resolution per tile (32-128px). Only for a new world: all tiles of a "
         "world share one pixel grid, so extensions keep the world's resolution.",
+    )
+    fill_radius: bool = Field(
+        default=False, description="Plan every tile within the world radius (drilled layers fill their hex)."
     )
     max_attempts: int = Field(default=3, ge=1, le=6)
     review_batch: int = Field(default=12, ge=1, le=16)

@@ -1,4 +1,4 @@
-import type { Run, RunOptions, TileDetail, World, WorldDetail } from "./types.gen";
+import type { EnterResult, Run, RunOptions, Scene, SpriteEntry, TileDetail, World, WorldDetail } from "./types.gen";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -40,6 +40,11 @@ export const api = {
   createWorld: (name?: string, radius?: number) => req<World>("POST", "/worlds", { name, radius }),
   getWorld: (id: string) => req<WorldDetail>("GET", `/worlds/${id}`),
   deleteWorld: (id: string) => req<{ deleted: boolean }>("DELETE", `/worlds/${id}`),
+  enterTile: (worldId: string, q: number, r: number, radius?: number) =>
+    req<EnterResult>("POST", `/worlds/${worldId}/tiles/${q}/${r}/enter`, { radius }),
+  getScene: (worldId: string, q: number, r: number) => req<Scene>("GET", `/worlds/${worldId}/tiles/${q}/${r}/scene`),
+  makeScene: (worldId: string, q: number, r: number) => req<Scene>("POST", `/worlds/${worldId}/tiles/${q}/${r}/scene`),
+  avatar: (worldId: string) => req<SpriteEntry | null>("POST", `/worlds/${worldId}/avatar`),
   getTile: (worldId: string, q: number, r: number) =>
     req<TileDetail>("GET", `/worlds/${worldId}/tiles/${q}/${r}`),
   startRun: (worldId: string, q: number, r: number, prompt: string, options: Partial<RunOptions>) =>

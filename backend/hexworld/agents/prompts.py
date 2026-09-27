@@ -90,6 +90,18 @@ terrains and connectors it needs to the vocabularies, and append their colour ra
 Tiles in occupied_nearby are built already: grow the new area outward from the origin into free
 space and transition naturally where it meets existing_tiles_nearby.
 
+If existing_world.drill is present, this map is the INSIDE of one tile of a larger map, seen up
+close (drill.parent_tile describes it; drill.scale says what one tile is now). Plan the whole hexagon
+(drill.map) as that one place, much closer: its terrain families become many finer terrains (one
+parent 'fishing village' tile becomes quays, net sheds, a slipway, cottage lanes, a chapel yard, rock
+pools). New terrains get new names for this scale; add them to the vocabulary. Each of the six sides
+of the hexagon borders the parent tile's edge on that side (parent_tile.edges, by direction name):
+lay a band of that terrain along the rim on that side. Every connector on a parent edge (a road, a
+river) must cross this map: a route from that side's rim toward the centre and on to the other side
+that carries the same connector. The landmark and props of the parent tile become real places here
+(its lighthouse is now a lighthouse compound with a keeper's cottage). Prop scale follows the new
+scale: at street or room scale people and objects are big (prop_scale 1.0-1.3).
+
 Deliver the plan in TWO calls, in this order:
 1. submit_world(header): world, style, tile_attributes and origin_tile. The origin starts building
    the moment you submit it, so decide the world first.
@@ -294,6 +306,8 @@ own height). Fields:
   village: {layout:'detached', lot_px:12, gap_px:4, street_grid:0, coverage:0.5, floors 1-2,
   roof:'gabled', facade:'punched'}.
 Streets, plazas, parks and water stay as their own (non-building) terrains/connectors.
+`scale` says what one tile is. Up close (a street corner, a garden, a room) everything is bigger:
+building lots 24-40px with 1-2 buildings per tile, larger pattern scales, fewer and bigger details.
 
 Workflow: draft, call render_material(spec) and LOOK: 4 tiles of your material (seamless? readable
 blocks? relief shading?) plus one tile bordering another material. Fix and re-render if needed

@@ -31,6 +31,9 @@ export interface ApiSchemas {
   run: Run;
   event: Event;
   start_run: StartRun;
+  enter_result: EnterResult;
+  scene: Scene;
+  sprite_entry: SpriteEntry;
   create_world: CreateWorld;
 }
 /**
@@ -42,6 +45,9 @@ export interface World {
   name: string;
   radius: number;
   created_at: number;
+  parent: ParentLink | null;
+  depth: number;
+  scale_note: string;
   spec: WorldSpec | null;
   style: StyleGuide | null;
   tile_attributes: AttributeDef[];
@@ -51,6 +57,20 @@ export interface World {
   };
   sprites: {
     [k: string]: SpriteEntry;
+  };
+}
+/**
+ * A drilled layer: this world is the inside of one tile of its parent world.
+ *
+ * This interface was referenced by `ApiSchemas`'s JSON-Schema
+ * via the `definition` "ParentLink".
+ */
+export interface ParentLink {
+  world_id: string;
+  q: number;
+  r: number;
+  context: {
+    [k: string]: unknown;
   };
 }
 /**
@@ -470,6 +490,9 @@ export interface WorldDetail {
   runs: Run[];
   active_run_id: string | null;
   last_event_id: number;
+  drills: {
+    [k: string]: string;
+  };
 }
 /**
  * This interface was referenced by `ApiSchemas`'s JSON-Schema
@@ -631,6 +654,10 @@ export interface RunOptions {
    * Ground texture resolution per tile (32-128px). Only for a new world: all tiles of a world share one pixel grid, so extensions keep the world's resolution.
    */
   tile_px: number | null;
+  /**
+   * Plan every tile within the world radius (drilled layers fill their hex).
+   */
+  fill_radius: boolean;
   max_attempts: number;
   review_batch: number;
   max_llm_calls: number;
@@ -865,6 +892,40 @@ export interface StartRun {
   r: number;
   prompt: string;
   options: RunOptions | null;
+}
+/**
+ * This interface was referenced by `ApiSchemas`'s JSON-Schema
+ * via the `definition` "EnterResult".
+ */
+export interface EnterResult {
+  world: World;
+  run: Run | null;
+}
+/**
+ * A tile seen up close: a layered, animated pixel-art picture of the spot.
+ *
+ * This interface was referenced by `ApiSchemas`'s JSON-Schema
+ * via the `definition` "Scene".
+ */
+export interface Scene {
+  world_id: string;
+  q: number;
+  r: number;
+  title: string;
+  caption: string;
+  layers: SceneLayer[];
+  fx: string[];
+  created_at: number;
+}
+/**
+ * This interface was referenced by `ApiSchemas`'s JSON-Schema
+ * via the `definition` "SceneLayer".
+ */
+export interface SceneLayer {
+  role: "backdrop" | "foreground";
+  asset_id: string;
+  px_w: number;
+  px_h: number;
 }
 /**
  * This interface was referenced by `ApiSchemas`'s JSON-Schema

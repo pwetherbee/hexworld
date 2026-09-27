@@ -47,11 +47,13 @@ interface State {
   libraryBusy: number;
   /** camera auto-follows the build (rate limited, yields to user input) */
   follow: boolean;
+  /** "q,r" -> the world inside that tile (entered at least once) */
+  drills: Record<string, string>;
   tileVersion: Record<string, number>;
   error: string | null;
 
   init: () => Promise<void>;
-  openWorld: (id: string) => Promise<void>;
+  openWorld: (id: string, opts?: { remember?: boolean }) => Promise<void>;
   newWorld: () => Promise<void>;
   deleteWorld: (id: string) => Promise<void>;
   refreshWorld: () => Promise<void>;
@@ -102,6 +104,7 @@ export const useStore = create<State>((set, get) => ({
   libMaterials: {},
   libraryBusy: 0,
   follow: localStorageGet("hexworld.follow") !== "0",
+  drills: {},
   tileVersion: {},
   error: null,
 
@@ -121,13 +124,13 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
-  openWorld: async (id) => {
+  openWorld: async (id, opts) => {
     const detail = await api.getWorld(id);
     const tiles: Record<string, Tile> = {};
     for (const t of detail.tiles) tiles[hexKey(t.q, t.r)] = t;
     const runs: Record<string, Run> = {};
     for (const r of detail.runs) runs[r.id] = r;
-    localStorageSet("hexworld.world", id);
+    if (opts?.remember !== false) localStorageSet("hexworld.world", id);
     set({
       world: detail.world,
       tiles,
@@ -146,6 +149,7 @@ export const useStore = create<State>((set, get) => ({
       libSprites: libFrom(detail.world),
       libMaterials: detail.world.materials ?? {},
       libraryBusy: 0,
+      drills: detail.drills ?? {},
     });
   },
 
@@ -181,6 +185,7 @@ export const useStore = create<State>((set, get) => ({
       worlds: s.worlds.map((x) => (x.id === detail.world.id ? detail.world : x)),
       libSprites: { ...s.libSprites, ...libFrom(detail.world) },
       libMaterials: { ...s.libMaterials, ...(detail.world.materials ?? {}) },
+      drills: detail.drills ?? s.drills,
     }));
   },
 
@@ -308,14 +313,14 @@ function libFrom(w: World): Record<string, LibSprite> {
   return out;
 }
 
-function localStorageGet(k: string): string | null {
+export function localStorageGet(k: string): string | null {
   try {
     return localStorage.getItem(k);
   } catch {
     return null;
   }
 }
-function localStorageSet(k: string, v: string) {
+export function localStorageSet(k: string, v: string) {
   try {
     localStorage.setItem(k, v);
   } catch {

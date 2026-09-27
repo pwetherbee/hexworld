@@ -28,11 +28,19 @@ class AgentFailed(Exception):
 def existing_world_payload(world: World) -> dict[str, Any] | None:
     if world.spec is None or world.style is None:
         return None
-    return {
+    out: dict[str, Any] = {
         "world": world.spec.model_dump(),
         "style": world.style.model_dump(),
         "tile_attributes": [a.model_dump() for a in world.tile_attributes],
     }
+    if world.parent is not None:  # a drilled layer: the inside of one tile of the parent world
+        out["drill"] = {
+            "depth": world.depth,
+            "scale": world.scale_note,
+            "parent_tile": world.parent.context,
+            "map": f"a full hexagon of radius {world.radius} ({3 * world.radius * (world.radius + 1) + 1} tiles)",
+        }
+    return out
 
 
 async def plan_world(

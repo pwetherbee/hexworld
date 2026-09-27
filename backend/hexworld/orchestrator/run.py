@@ -324,6 +324,7 @@ class RunExecutor:
                 world_radius=w.radius,
                 occupied=occupied_set,
                 connectors=vocab_c,
+                fill_radius=opts.fill_radius,
             )
 
         async with self.tracer.span("super.plan", root, max_tiles=opts.max_tiles) as sp:

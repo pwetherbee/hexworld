@@ -14,7 +14,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from hexworld.config import REPO_ROOT, get_settings
-from hexworld.domain import Attempt, Run, RunOptions, Tile, World
+from hexworld.domain import Attempt, Run, RunOptions, Scene, Tile, World
+from hexworld.domain.art import SpriteEntry
 from hexworld.orchestrator.runtime import RunConflict, Runtime
 from hexworld.telemetry import Event
 
@@ -39,6 +40,16 @@ class WorldDetail(BaseModel):
     runs: list[Run]
     active_run_id: str | None
     last_event_id: int  # tiles reflect every event up to this id (clients skip older tile updates)
+    drills: dict[str, str] = Field(default_factory=dict)  # "q,r" -> the world inside that tile
+
+
+class EnterTile(BaseModel):
+    radius: int = Field(default=5, ge=2, le=7)
+
+
+class EnterResult(BaseModel):
+    world: World
+    run: Run | None
 
 
 class TileDetail(BaseModel):
@@ -56,6 +67,9 @@ class ApiSchemas(BaseModel):
     run: Run
     event: Event
     start_run: StartRun
+    enter_result: EnterResult
+    scene: Scene
+    sprite_entry: SpriteEntry
     create_world: CreateWorld
 
 
@@ -79,7 +93,7 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
 
     @app.get("/api/worlds")
     async def list_worlds() -> list[World]:
-        return rt().store.list_worlds()
+        return [w for w in rt().store.list_worlds() if w.depth == 0]  # layers are reached by entering tiles
 
     @app.post("/api/worlds")
     async def create_world(body: CreateWorld) -> World:
@@ -98,7 +112,43 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
             tiles=store.list_tiles(world_id),
             runs=store.list_runs(world_id)[:30],
             active_run_id=rt().active_run(world_id),
+            drills=store.list_drills(world_id),
         )
+
+    @app.post("/api/worlds/{world_id}/tiles/{q}/{r}/enter")
+    async def enter_tile(world_id: str, q: int, r: int, body: EnterTile) -> EnterResult:
+        """The world inside a tile; the first entry creates it and starts building it."""
+        try:
+            world, run = await rt().layers.enter(world_id, q, r, body.radius)
+        except KeyError as e:
+            raise HTTPException(404, "world not found") from e
+        except (ValueError, RunConflict) as e:
+            raise HTTPException(409, str(e)) from e
+        return EnterResult(world=world, run=run)
+
+    @app.get("/api/worlds/{world_id}/tiles/{q}/{r}/scene")
+    async def get_scene(world_id: str, q: int, r: int) -> Scene:
+        scene = rt().store.get_scene(world_id, q, r)
+        if scene is None:
+            raise HTTPException(404, "no scene yet")
+        return scene
+
+    @app.post("/api/worlds/{world_id}/tiles/{q}/{r}/scene")
+    async def make_scene(world_id: str, q: int, r: int) -> Scene:
+        """The tile seen up close, painted on first request (then stored)."""
+        try:
+            return await rt().layers.scene(world_id, q, r)
+        except KeyError as e:
+            raise HTTPException(404, "world not found") from e
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from e
+
+    @app.post("/api/worlds/{world_id}/avatar")
+    async def avatar(world_id: str) -> SpriteEntry | None:
+        try:
+            return await rt().layers.avatar(world_id)
+        except KeyError as e:
+            raise HTTPException(404, "world not found") from e
 
     @app.delete("/api/worlds/{world_id}")
     async def delete_world(world_id: str) -> dict[str, bool]:

@@ -86,19 +86,21 @@ class OpenAISpritePainter:
         self.quality = quality
         self._sem = asyncio.Semaphore(max(1, concurrency))
 
-    async def paint(self, prompt: str) -> tuple[bytes, dict[str, int]]:
+    async def paint(
+        self, prompt: str, size: str = "1024x1024", background: str = "transparent"
+    ) -> tuple[bytes, dict[str, int]]:
         """-> (png, usage) where usage has text/image input and output token counts."""
         async with self._sem:
-            r = await self._generate(prompt)
+            r = await self._generate(prompt, size, background)
         return self._result(r)
 
-    async def _generate(self, prompt: str) -> Any:
+    async def _generate(self, prompt: str, size: str = "1024x1024", background: str = "transparent") -> Any:
         return await self._client.images.generate(
             model=self.model,
             prompt=prompt,
-            size="1024x1024",
+            size=size,
             quality=self.quality,
-            background="transparent",
+            background=background,
             n=1,
         )
 

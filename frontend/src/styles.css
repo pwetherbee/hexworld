@@ -272,3 +272,40 @@ section p, .disclosure p { margin: 4px 0; line-height: 1.5; }
 .transcript li.llm { color: var(--muted); }
 .etype.agent { color: #93c5fd; }
 .etype.director, .etype.library { color: #f472b6; }
+
+/* ---------------------------------------------------------------- play mode */
+.game-pill { position: absolute; top: 14px; left: 50%; translate: -50% 0; z-index: 6; display: flex; align-items: center; gap: 6px; padding: 3px; background: var(--glass); border: 1px solid var(--line); border-radius: 18px; backdrop-filter: blur(10px); animation: rise-in 0.5s 0.12s var(--ease) both; }
+.game-pill button { border: 0; border-radius: 14px; padding: 6px 14px; font-weight: 600; cursor: pointer; background: none; color: var(--text); transition: background 0.15s, color 0.15s, transform 0.15s var(--spring); }
+.game-play { background: rgba(139, 211, 247, 0.16) !important; color: var(--accent) !important; }
+.game-play:hover:not(:disabled) { background: rgba(139, 211, 247, 0.26) !important; transform: scale(1.04); }
+.game-play:disabled { opacity: 0.45; cursor: default; }
+.game-pill.playing .crumbs { display: flex; gap: 6px; padding: 0 6px 0 10px; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+.game-pill.playing .crumbs span:first-child { color: var(--text); font-weight: 600; }
+.game-exit:hover { background: rgba(255, 255, 255, 0.08) !important; }
+
+.play-hud { position: absolute; left: 50%; bottom: 18px; translate: -50% 0; z-index: 6; width: min(560px, calc(100vw - 32px)); padding: 12px 14px 10px; background: var(--glass-strong); border: 1px solid var(--line-2); border-radius: 16px; backdrop-filter: blur(12px); animation: rise-in 0.4s var(--ease) both; }
+.play-hud .place-name { font-weight: 700; font-size: 15px; letter-spacing: 0.01em; }
+.play-hud .place-line { margin-top: 2px; font-size: 12.5px; color: var(--muted); line-height: 1.4; }
+.play-actions { display: flex; gap: 8px; margin-top: 10px; }
+.play-actions button { border: 1px solid var(--line-2); background: rgba(255, 255, 255, 0.04); color: var(--text); border-radius: 10px; padding: 7px 12px; font-weight: 600; cursor: pointer; transition: background 0.15s, transform 0.15s var(--spring); }
+.play-actions button.primary { background: rgba(139, 211, 247, 0.18); border-color: rgba(139, 211, 247, 0.35); color: var(--accent); }
+.play-actions button:hover:not(:disabled) { transform: translateY(-1px); background: rgba(255, 255, 255, 0.08); }
+.play-actions button:disabled { opacity: 0.45; cursor: default; }
+.play-hint { margin-top: 8px; font-size: 11px; color: var(--muted); }
+
+.scene-overlay { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; background: rgba(4, 5, 8, 0.86); backdrop-filter: blur(6px); animation: fade-in 0.35s var(--ease) both; }
+.scene-frame { position: relative; width: min(96vw, calc(92vh * 368 / 244)); aspect-ratio: 368 / 244; border-radius: 10px; overflow: hidden; box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6), 0 0 0 1px var(--line-2); }
+.scene-frame .scene-canvas { width: 100%; height: 100%; display: block; image-rendering: pixelated; opacity: 0; transform: scale(1.04); transition: opacity 0.9s var(--ease), transform 1.4s var(--ease); }
+.scene-frame.shown .scene-canvas { opacity: 1; transform: scale(1); }
+.scene-frame::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: radial-gradient(ellipse at center, transparent 55%, rgba(0, 0, 0, 0.35) 100%); }
+.scene-card { position: absolute; left: 18px; bottom: 16px; z-index: 2; max-width: 60%; padding: 10px 14px; background: rgba(10, 11, 16, 0.62); border: 1px solid var(--line-2); border-radius: 12px; backdrop-filter: blur(6px); opacity: 0; transform: translateY(8px); transition: opacity 0.6s 0.7s var(--ease), transform 0.6s 0.7s var(--ease); }
+.scene-frame.shown .scene-card { opacity: 1; transform: none; }
+.scene-title { font-weight: 700; font-size: 16px; }
+.scene-caption { margin-top: 3px; font-size: 12.5px; color: #c9cdd6; line-height: 1.45; }
+.scene-back { position: absolute; top: 18px; right: 18px; z-index: 21; border: 1px solid var(--line-2); background: var(--glass); color: var(--text); border-radius: 12px; padding: 7px 12px; font-weight: 600; cursor: pointer; }
+.scene-frame.painting { display: grid; place-items: center; background: #07080c; }
+.paint-grid { display: grid; grid-template-columns: repeat(12, 1fr); width: 70%; aspect-ratio: 12 / 8; gap: 3px; }
+.paint-grid span { border-radius: 2px; opacity: 0.15; animation: paint-cell 1.6s var(--ease) infinite alternate; }
+@keyframes paint-cell { from { opacity: 0.08; transform: scale(0.7); } to { opacity: 0.95; transform: scale(1); } }
+.paint-label { position: absolute; bottom: 18px; font-size: 13px; color: var(--muted); letter-spacing: 0.02em; }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }

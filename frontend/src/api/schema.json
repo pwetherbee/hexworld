@@ -492,6 +492,29 @@
       "title": "EdgeSpec",
       "type": "object"
     },
+    "EnterResult": {
+      "properties": {
+        "world": {
+          "$ref": "#/$defs/World"
+        },
+        "run": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Run"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "world",
+        "run"
+      ],
+      "title": "EnterResult",
+      "type": "object"
+    },
     "Event": {
       "properties": {
         "id": {
@@ -744,6 +767,32 @@
         "buildings"
       ],
       "title": "MaterialSpec",
+      "type": "object"
+    },
+    "ParentLink": {
+      "description": "A drilled layer: this world is the inside of one tile of its parent world.",
+      "properties": {
+        "world_id": {
+          "type": "string"
+        },
+        "q": {
+          "type": "integer"
+        },
+        "r": {
+          "type": "integer"
+        },
+        "context": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "required": [
+        "world_id",
+        "q",
+        "r",
+        "context"
+      ],
+      "title": "ParentLink",
       "type": "object"
     },
     "PatternOp": {
@@ -1008,6 +1057,11 @@
           "default": null,
           "description": "Ground texture resolution per tile (32-128px). Only for a new world: all tiles of a world share one pixel grid, so extensions keep the world's resolution."
         },
+        "fill_radius": {
+          "default": false,
+          "description": "Plan every tile within the world radius (drilled layers fill their hex).",
+          "type": "boolean"
+        },
         "max_attempts": {
           "default": 3,
           "maximum": 6,
@@ -1042,6 +1096,7 @@
         "max_tiles",
         "radius",
         "tile_px",
+        "fill_radius",
         "max_attempts",
         "review_batch",
         "max_llm_calls",
@@ -1165,6 +1220,81 @@
         "chance"
       ],
       "title": "ScatterSpec",
+      "type": "object"
+    },
+    "Scene": {
+      "description": "A tile seen up close: a layered, animated pixel-art picture of the spot.",
+      "properties": {
+        "world_id": {
+          "type": "string"
+        },
+        "q": {
+          "type": "integer"
+        },
+        "r": {
+          "type": "integer"
+        },
+        "title": {
+          "type": "string"
+        },
+        "caption": {
+          "type": "string"
+        },
+        "layers": {
+          "items": {
+            "$ref": "#/$defs/SceneLayer"
+          },
+          "type": "array"
+        },
+        "fx": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "created_at": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "world_id",
+        "q",
+        "r",
+        "title",
+        "caption",
+        "layers",
+        "fx",
+        "created_at"
+      ],
+      "title": "Scene",
+      "type": "object"
+    },
+    "SceneLayer": {
+      "properties": {
+        "role": {
+          "enum": [
+            "backdrop",
+            "foreground"
+          ],
+          "type": "string"
+        },
+        "asset_id": {
+          "type": "string"
+        },
+        "px_w": {
+          "type": "integer"
+        },
+        "px_h": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "role",
+        "asset_id",
+        "px_w",
+        "px_h"
+      ],
+      "title": "SceneLayer",
       "type": "object"
     },
     "Scores": {
@@ -1900,6 +2030,25 @@
         "created_at": {
           "type": "number"
         },
+        "parent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ParentLink"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "depth": {
+          "default": 0,
+          "type": "integer"
+        },
+        "scale_note": {
+          "default": "",
+          "type": "string"
+        },
         "spec": {
           "anyOf": [
             {
@@ -1952,6 +2101,9 @@
         "name",
         "radius",
         "created_at",
+        "parent",
+        "depth",
+        "scale_note",
         "spec",
         "style",
         "tile_attributes",
@@ -1991,6 +2143,12 @@
         },
         "last_event_id": {
           "type": "integer"
+        },
+        "drills": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
         }
       },
       "required": [
@@ -1998,7 +2156,8 @@
         "tiles",
         "runs",
         "active_run_id",
-        "last_event_id"
+        "last_event_id",
+        "drills"
       ],
       "title": "WorldDetail",
       "type": "object"
@@ -2110,6 +2269,15 @@
     "start_run": {
       "$ref": "#/$defs/StartRun"
     },
+    "enter_result": {
+      "$ref": "#/$defs/EnterResult"
+    },
+    "scene": {
+      "$ref": "#/$defs/Scene"
+    },
+    "sprite_entry": {
+      "$ref": "#/$defs/SpriteEntry"
+    },
     "create_world": {
       "$ref": "#/$defs/CreateWorld"
     }
@@ -2122,6 +2290,9 @@
     "run",
     "event",
     "start_run",
+    "enter_result",
+    "scene",
+    "sprite_entry",
     "create_world"
   ],
   "title": "ApiSchemas",

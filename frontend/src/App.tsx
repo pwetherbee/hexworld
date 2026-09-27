@@ -5,10 +5,13 @@ import { installUiSounds } from "./sfx";
 import { useStore } from "./store";
 import { Controls, EmptyHint, RunCapsule, Toast, WorldPill } from "./ui/Chrome";
 import { Inspector } from "./ui/Inspector";
+import { GamePill, PlayHud, SceneView } from "./ui/Play";
+import { usePlay } from "./play";
 import { PromptModal } from "./ui/PromptModal";
 
 export function App() {
   const world = useStore((s) => s.world);
+  const playing = usePlay((s) => s.active);
   useEffect(() => {
     void useStore.getState().init();
     return installUiSounds();
@@ -18,13 +21,16 @@ export function App() {
   return (
     <div className="app">
       <Board />
-      <WorldPill />
+      {!playing && <WorldPill />}
+      <GamePill />
       <Controls />
-      <EmptyHint />
-      <RunCapsule />
+      {!playing && <EmptyHint />}
+      {!playing && <RunCapsule />}
       <Toast />
-      <Inspector />
-      <PromptModal />
+      {!playing && <Inspector />}
+      {!playing && <PromptModal />}
+      <PlayHud />
+      <SceneView />
     </div>
   );
 }

@@ -2,7 +2,9 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { useEffect } from "react";
 import * as THREE from "three";
 import { useStore } from "../store";
+import { usePlay } from "../play";
 import { CameraDirector } from "./CameraDirector";
+import { PlayLayer } from "./PlayLayer";
 import { CameraRig, rig } from "./cameraRig";
 import { hexToWorld, parseKey } from "./hexMath";
 import { HexGrid } from "./HexGrid";
@@ -12,6 +14,7 @@ import { TileMesh } from "./TileMesh";
 
 export function Board() {
   const world = useStore((s) => s.world);
+  const playing = usePlay((s) => s.active);
   return (
     <Canvas className="board" dpr={[1, 2]} camera={{ position: [0, 18, 16], fov: 38, near: 0.1, far: 600 }} gl={{ antialias: true }}>
       <color attach="background" args={["#090a0f"]} />
@@ -28,7 +31,7 @@ export function Board() {
       {world && (
         <>
           <Tiles />
-          <CameraDirector />
+          {playing ? <PlayLayer /> : <CameraDirector />}
         </>
       )}
     </Canvas>
@@ -39,7 +42,7 @@ export function Board() {
 function WorldFramer() {
   const worldId = useStore((s) => s.world?.id);
   useEffect(() => {
-    if (!worldId) return;
+    if (!worldId || usePlay.getState().active) return; // in play the camera follows the traveller
     const keys = Object.keys(useStore.getState().tiles).filter((k) => useStore.getState().tiles[k].status === "accepted");
     if (!keys.length) {
       rig.setGoal(new THREE.Vector3(0, 0, 0), 14);
@@ -68,9 +71,15 @@ function DevProbe() {
   const scene = useThree((s) => s.scene);
   const camera = useThree((s) => s.camera);
   useEffect(() => {
-    const w = window as unknown as { __hexScene?: unknown; __hexStore?: unknown; __hexCamera?: unknown };
+    const w = window as unknown as {
+      __hexScene?: unknown;
+      __hexStore?: unknown;
+      __hexCamera?: unknown;
+      __hexPlay?: unknown;
+    };
     w.__hexScene = scene;
     w.__hexStore = useStore;
+    w.__hexPlay = usePlay;
     w.__hexCamera = camera;
   }, [scene, camera]);
   return null;

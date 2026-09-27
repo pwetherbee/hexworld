@@ -85,6 +85,7 @@ class MaterialArtist:
             "material": self.name,
             "is_connector": self.is_connector,
             "connectors": list(w.spec.connector_vocabulary) if w.spec else [],
+            "scale": w.scale_note or "a tile is a landscape chunk or a city block",
         }
         self.renders = 0
         res = await self.handle.run([text_part(payload)], parent, max_calls=6)

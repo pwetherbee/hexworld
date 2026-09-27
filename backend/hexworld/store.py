@@ -15,7 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from hexworld.domain import Attempt, Run, Tile, TileStatus, World
+from hexworld.domain import Attempt, Run, Scene, Tile, TileStatus, World
 from hexworld.telemetry.events import Event
 
 SCHEMA = """
@@ -33,6 +33,12 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_world ON events (world_id, id);
 CREATE INDEX IF NOT EXISTS events_run ON events (run_id, id);
 CREATE TABLE IF NOT EXISTS assets (id TEXT PRIMARY KEY, meta TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS drills (
+  world_id TEXT NOT NULL, q INTEGER NOT NULL, r INTEGER NOT NULL, child_id TEXT NOT NULL,
+  PRIMARY KEY (world_id, q, r));
+CREATE TABLE IF NOT EXISTS scenes (
+  world_id TEXT NOT NULL, q INTEGER NOT NULL, r INTEGER NOT NULL, json TEXT NOT NULL,
+  PRIMARY KEY (world_id, q, r));
 CREATE TABLE IF NOT EXISTS llm_records (
   key TEXT NOT NULL, seq INTEGER NOT NULL, response TEXT NOT NULL, PRIMARY KEY (key, seq));
 """
@@ -70,6 +76,37 @@ class Store:
         rows = self._db.execute("SELECT json FROM worlds").fetchall()
         return sorted((World.model_validate_json(r[0]) for r in rows), key=lambda w: -w.created_at)
 
+    # ------------------------------------------------------------------ layers (drilling) and scenes
+    def put_drill(self, world_id: str, q: int, r: int, child_id: str) -> None:
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT OR REPLACE INTO drills (world_id, q, r, child_id) VALUES (?, ?, ?, ?)",
+                (world_id, q, r, child_id),
+            )
+
+    def get_drill(self, world_id: str, q: int, r: int) -> str | None:
+        row = self._db.execute(
+            "SELECT child_id FROM drills WHERE world_id=? AND q=? AND r=?", (world_id, q, r)
+        ).fetchone()
+        return row[0] if row else None
+
+    def list_drills(self, world_id: str) -> dict[str, str]:
+        rows = self._db.execute("SELECT q, r, child_id FROM drills WHERE world_id=?", (world_id,)).fetchall()
+        return {f"{q},{r}": c for q, r, c in rows}
+
+    def put_scene(self, scene: Scene) -> None:
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT OR REPLACE INTO scenes (world_id, q, r, json) VALUES (?, ?, ?, ?)",
+                (scene.world_id, scene.q, scene.r, scene.model_dump_json()),
+            )
+
+    def get_scene(self, world_id: str, q: int, r: int) -> Scene | None:
+        row = self._db.execute(
+            "SELECT json FROM scenes WHERE world_id=? AND q=? AND r=?", (world_id, q, r)
+        ).fetchone()
+        return Scene.model_validate_json(row[0]) if row else None
+
     def delete_world(self, world_id: str) -> bool:
         """Remove a world with its tiles, runs, attempts and events (and the runs' JSONL mirrors).
         Asset files are content-addressed and may be shared, so they stay on disk."""
@@ -79,6 +116,8 @@ class Store:
             self._db.execute("DELETE FROM tiles WHERE world_id=?", (world_id,))
             self._db.execute("DELETE FROM events WHERE world_id=?", (world_id,))
             self._db.execute("DELETE FROM runs WHERE world_id=?", (world_id,))
+            self._db.execute("DELETE FROM drills WHERE world_id=? OR child_id=?", (world_id, world_id))
+            self._db.execute("DELETE FROM scenes WHERE world_id=?", (world_id,))
             self._db.executemany("DELETE FROM attempts WHERE run_id=?", [(r,) for r in run_ids])
         for r in run_ids:
             (self.runs_dir / f"{r}.jsonl").unlink(missing_ok=True)

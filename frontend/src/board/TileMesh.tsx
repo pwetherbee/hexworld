@@ -2,11 +2,13 @@ import { useFrame } from "@react-three/fiber";
 import { memo, useEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
 import type { TileLayer } from "../api/types.gen";
+import { usePlay } from "../play";
 import { useStore } from "../store";
 import { type FormingUniforms, makeFormingMaterial, tilePalette } from "./forming";
 import { SHARED, hexOutlinePoints, tileFaceGeometry } from "./geometry";
 import { DIRECTIONS, Spring, hexDistance, hexKey, hexToWorld } from "./hexMath";
 import {
+  BLANK_MAP,
   LEVEL_STEP,
   SURFACE_CELLS,
   levelAt,
@@ -93,7 +95,7 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
   const relief = useMemo(() => makeReliefMaterial(), []);
   useEffect(() => () => relief.material.dispose(), [relief]);
   useEffect(() => {
-    relief.material.map = tex;
+    relief.material.map = tex ?? BLANK_MAP;
     relief.material.needsUpdate = true;
   }, [relief, tex]);
   useEffect(() => {
@@ -264,6 +266,10 @@ export const TileMesh = memo(function TileMesh({ tileKey }: { tileKey: string })
   const onClick = (e: { stopPropagation: () => void; delta: number }) => {
     e.stopPropagation();
     if (e.delta > 5) return;
+    if (usePlay.getState().active) {
+      usePlay.getState().click(tileKey);
+      return;
+    }
     const s = useStore.getState();
     s.select(s.selected === tileKey ? null : tileKey);
   };

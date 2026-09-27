@@ -352,9 +352,16 @@ export type ReliefUniforms = {
  *   building's wall colour (facade layer) and facade code (style, lit share): windows, lit or dark,
  *   ground-floor shopfronts and floor lines, on a world-aligned pixel grid.
  */
+/** Stand-in map until the tile's texture loads: the shader always compiles with a map (it reads map UVs). */
+export const BLANK_MAP = (() => {
+  const t = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+  t.needsUpdate = true;
+  return t;
+})();
+
 export function makeReliefMaterial(): { material: THREE.MeshBasicMaterial; uniforms: ReliefUniforms } {
   const uniforms: ReliefUniforms = { uFacade: { value: null }, uFacadeOn: { value: 0 } };
-  const material = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
+  const material = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide, map: BLANK_MAP });
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = SURFACE_TIME;
     shader.uniforms.uCells = SURFACE_CELLS;
