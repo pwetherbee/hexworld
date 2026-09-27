@@ -10,6 +10,8 @@ Heightmap PNG (RGB, tile canvas):
   R = relief level 0..MAX_LEVEL (terrain plus buildings: towers reach high)
   G = flags: FLAG_FORMAT (always set in this format) | FLAG_LIQUID (liquid surface, animated)
   B = facade code of a building pixel: style << 5 | lit (0 = not a building)
+  G's low 6 bits = relief levels per floor of a building pixel (0 = 1: the overworld; a drilled
+  layer's buildings are the parent's, zoomed, so one floor spans several levels)
 Older heightmaps (R = level * 40, G = 0/255) are still read.
 
 In memory, levels are int32 with the level in the low bits, LIQUID_BIT for liquids and the facade
@@ -29,6 +31,7 @@ MAX_WALL_PX = 14  # 2D previews cap tall walls so a tower doesn't paint over the
 LEVEL_MASK = 1023
 LIQUID_BIT = 1 << 10
 FACADE_SHIFT = 12
+FLOOR_SHIFT = FACADE_SHIFT + 8  # levels per floor (6 bits), above the facade code
 FLAG_FORMAT, FLAG_LIQUID = 64, 128
 LEGACY_SCALE = 40
 
@@ -50,11 +53,15 @@ def facade_codes(h: np.ndarray) -> np.ndarray:
     return (h.astype(np.int32) >> FACADE_SHIFT) & 0xFF
 
 
+def floor_scales(h: np.ndarray) -> np.ndarray:
+    return (h.astype(np.int32) >> FLOOR_SHIFT) & 63
+
+
 def levels_to_png(levels: np.ndarray) -> bytes:
     lv, liquid = split_levels(levels)
     rgb = np.zeros((*lv.shape, 3), np.uint8)
     rgb[..., 0] = np.clip(lv, 0, MAX_LEVEL)
-    rgb[..., 1] = FLAG_FORMAT | np.where(liquid, FLAG_LIQUID, 0)
+    rgb[..., 1] = FLAG_FORMAT | np.where(liquid, FLAG_LIQUID, 0) | floor_scales(levels)
     rgb[..., 2] = facade_codes(levels)
     buf = io.BytesIO()
     Image.fromarray(rgb, "RGB").save(buf, format="PNG")
@@ -62,10 +69,11 @@ def levels_to_png(levels: np.ndarray) -> bytes:
 
 
 def _decode(png: bytes) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(levels, liquid, facade code | levels per floor << 8)."""
     a = np.asarray(Image.open(io.BytesIO(png)).convert("RGB"), dtype=np.int32)
     r, g, b = a[..., 0], a[..., 1], a[..., 2]
     if ((g & FLAG_FORMAT) > 0).all() and not (g == 255).any():
-        return r, (g & FLAG_LIQUID) > 0, b
+        return r, (g & FLAG_LIQUID) > 0, b | ((g & 63) << 8)
     return np.rint(r / LEGACY_SCALE).astype(np.int32), g > 127, np.zeros_like(r)  # legacy
 
 

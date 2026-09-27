@@ -433,8 +433,8 @@ def frame_blocks(img: np.ndarray, mat: np.ndarray, heights: np.ndarray, ctx: Ctx
 
 
 FLOOR_LEVELS = 1  # relief levels per building floor (1 level = 0.055 world units in 3D)
-MAX_ZOOM_LEVELS = 120  # a zoomed building's height cap (relief levels)
-LENS_ELEVATION = 0.5  # landforms up close rise less steeply than buildings (share of `levels`)
+MAX_ZOOM_LEVELS = 230  # a zoomed building's height cap (relief levels, MAX_LEVEL 250)
+LENS_ELEVATION = 0.25  # landforms up close rise less steeply than buildings (share of `levels`)
 
 
 def _hex_rgb(c: str) -> np.ndarray:
@@ -576,6 +576,8 @@ def paint_buildings(
     lit = np.clip(b.lit + (_hash(col, row, seed + 8.2) - 0.5) * 0.3, 0, 1)
     style_code = facade_code(b.facade, 0.0)
     codes[built] = style_code | np.rint(lit[built] * 31).astype(np.int32)
+    if lv > 1:  # levels per floor, for the 3D facades (one row of windows per real floor)
+        codes[built] |= min(63, round(lv)) << 8
 
 
 def _blur(a: np.ndarray, sigma: float) -> np.ndarray:

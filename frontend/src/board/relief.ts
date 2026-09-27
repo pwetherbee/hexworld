@@ -17,7 +17,7 @@ const FLAG_FORMAT = 64;
 const FLAG_LIQUID = 128;
 
 /** Decoded heightmap: level per texel (up to 250: towers), liquid flag, building facade code. */
-export type Levels = { C: number; data: Uint8Array; liquid: Uint8Array; code: Uint8Array };
+export type Levels = { C: number; data: Uint8Array; liquid: Uint8Array; code: Uint8Array; floor: Uint8Array };
 
 const cache = new Map<string, Levels>();
 const pending = new Map<string, Promise<Levels>>();
@@ -36,7 +36,9 @@ async function loadLevels(id: string): Promise<Levels> {
   const data = new Uint8Array(n);
   const liquid = new Uint8Array(n);
   const code = new Uint8Array(n);
-  // format: R = level, G = flags (format marker | liquid), B = facade code (backend art/relief.py)
+  const floor = new Uint8Array(n); // relief levels per floor (0/1 = one; zoomed-in layers more)
+  // format: R = level, G = flags (format marker | liquid | levels per floor in the low 6 bits),
+  // B = facade code (backend art/relief.py)
   let modern = true;
   for (let k = 0; k < n; k++) {
     const g = px[k * 4 + 1];
@@ -52,12 +54,13 @@ async function loadLevels(id: string): Promise<Levels> {
       data[k] = r;
       liquid[k] = g & FLAG_LIQUID ? 1 : 0;
       code[k] = px[k * 4 + 2];
+      floor[k] = g & 63;
     } else {
       data[k] = Math.round(r / LEGACY_SCALE);
       liquid[k] = g > 127 && px[k * 4 + 2] < 64 ? 1 : 0;
     }
   }
-  return { C: bmp.width, data, liquid, code };
+  return { C: bmp.width, data, liquid, code, floor };
 }
 
 /** The heightmap for `id`, or null while it loads (never a previous id's levels). */
@@ -175,7 +178,9 @@ export function reliefGeometry(q: number, r: number, heightId: string, lv: Level
   const V = (z: number) => 1 - (cy + z * s - oy) / C;
 
   const W = (i: number, j: number) => (i < 0 || j < 0 || i >= C || j >= C ? 0 : lv.liquid[j * C + i]);
-  const K = (i: number, j: number) => (i < 0 || j < 0 || i >= C || j >= C ? 0 : lv.code[j * C + i]);
+  // facade code + 256 * levels per floor (the shader splits them)
+  const K = (i: number, j: number) =>
+    i < 0 || j < 0 || i >= C || j >= C ? 0 : lv.code[j * C + i] + 256 * Math.max(1, lv.floor?.[j * C + i] ?? 1);
   const pos: number[] = [];
   const uv: number[] = [];
   const col: number[] = [];
@@ -398,15 +403,17 @@ export function makeReliefMaterial(): { material: THREE.MeshBasicMaterial; unifo
           diffuseColor.rgb *= 1.0 + 0.11 * step(1.2, band) - 0.05 * step(band, -1.25);
         }
         if (vFacade.x > 0.5 && vFacade.w > 0.5 && uFacadeOn > 0.5) {
-          float code = floor(vFacade.w + 0.5);
+          float packed = floor(vFacade.w + 0.5);
+          float fs = max(1.0, floor(packed / 256.0)); // relief levels per floor (zoomed layers)
+          float code = mod(packed, 256.0);
           float style = floor(code / 32.0);
           float litShare = mod(code, 32.0) / 31.0;
           vec3 wallc = texture2D(uFacade, vMapUv).rgb;
-          float ix = floor(vFacade.y);              // world pixel along the wall
-          float lvl = vFacade.z;                    // relief level = floor
+          float ix = floor(vFacade.y / fs);         // window column (world px, scaled with the floor)
+          float lvl = vFacade.z / fs;               // floors up the wall
           float fl = floor(lvl + 0.001);
           float sub = lvl - fl;                     // 0..1 within the floor
-          float rel = lvl - vBase;                  // height above the wall's foot
+          float rel = (vFacade.z - vBase) / fs;     // floors above the wall's foot
           float c3 = mod(ix, 3.0), c4 = mod(ix, 4.0), c5 = mod(ix, 5.0), c6 = mod(ix, 6.0);
           bool win = false;
           vec3 glass = vec3(0.035, 0.05, 0.08);
@@ -435,6 +442,6 @@ export function makeReliefMaterial(): { material: THREE.MeshBasicMaterial; unifo
         }`,
       );
   };
-  material.customProgramCacheKey = () => "hexworld-relief-v2";
+  material.customProgramCacheKey = () => "hexworld-relief-v3";
   return { material, uniforms };
 }

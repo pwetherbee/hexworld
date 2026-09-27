@@ -2529,7 +2529,7 @@ class RunExecutor:
 
 
 LOT_PX_UP_CLOSE = 28  # building footprint in a drilled layer (a tile is about one lot)
-LENS_LEVELS = 0.5  # relief levels here per parent level, per unit of zoom (buildings, landforms)
+LENS_LEVELS = 1.0  # relief levels here per parent level, per unit of zoom (a floor keeps its true height)
 STREET_WIDTH_UP_CLOSE = 3.5  # a street in a drilled layer, relative to the overworld's
 PATH_WIDTH_UP_CLOSE = 1.5  # a winding path or lane (the overworld draws them generously already)
 

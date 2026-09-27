@@ -480,3 +480,13 @@ def test_a_lens_shows_the_parents_buildings_up_close():
     n_zoom, size_zoom = buildings(city.model_copy(update={"lens": lens}))
     assert n_own >= 5 and n_zoom <= 3  # slices of a few big buildings, clipped by the tile
     assert "lens" not in str(MaterialSpec.model_json_schema())
+
+
+def test_levels_per_floor_survive_the_heightmap_png():
+    from hexworld.art.relief import FLOOR_SHIFT, facade_codes, floor_scales, levels_to_png, load_heightmap
+
+    h = np.zeros((4, 4), np.int32)
+    h[1, 1] = 30 | (0b0100001 << 12) | (7 << FLOOR_SHIFT)  # a zoomed building: 7 levels per floor
+    back = load_heightmap(levels_to_png(h))
+    assert back[1, 1] & 1023 == 30 and facade_codes(back)[1, 1] == 0b0100001 and floor_scales(back)[1, 1] == 7
+    assert floor_scales(back)[0, 0] == 0
