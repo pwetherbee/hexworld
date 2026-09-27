@@ -705,6 +705,11 @@
           ],
           "type": "string"
         },
+        "width": {
+          "default": 1.0,
+          "description": "Connectors only: width relative to the usual (the engine sets it for close-up layers; leave 1).",
+          "type": "number"
+        },
         "height": {
           "default": 1,
           "description": "Base relief level 0-4 (liquids 0, plains 1, hills 2, rock 3+).",
@@ -759,6 +764,7 @@
         "block_style",
         "edges",
         "markings",
+        "width",
         "height",
         "elevation",
         "height_ops",
@@ -784,13 +790,27 @@
         "context": {
           "additionalProperties": true,
           "type": "object"
+        },
+        "guide": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "routes": {
+          "items": {
+            "$ref": "#/$defs/Route"
+          },
+          "type": "array"
         }
       },
       "required": [
         "world_id",
         "q",
         "r",
-        "context"
+        "context",
+        "guide",
+        "routes"
       ],
       "title": "ParentLink",
       "type": "object"
@@ -943,6 +963,27 @@
         "scale"
       ],
       "title": "PropSpec",
+      "type": "object"
+    },
+    "Route": {
+      "properties": {
+        "connector": {
+          "description": "From connector_vocabulary (river, road, corridor...).",
+          "type": "string"
+        },
+        "points": {
+          "description": ">= 2 waypoints; the route runs tile to tile between them.",
+          "items": {
+            "$ref": "#/$defs/Coord"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "connector",
+        "points"
+      ],
+      "title": "Route",
       "type": "object"
     },
     "Run": {

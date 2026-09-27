@@ -491,6 +491,11 @@ class ParentLink(BaseModel):
     q: int
     r: int
     context: dict[str, Any] = Field(default_factory=dict)  # the parent tile as the planner sees it
+    # "q,r" -> terrain: the parent tile's own map zoomed up to this layer (its streets, water, blocks
+    # land where they are on the parent); the layout follows it, so the region IS the tile up close
+    guide: dict[str, str] = Field(default_factory=dict)
+    # the parent's streets traced tile by tile (straight connectors through the tiles they cross)
+    routes: list[Route] = Field(default_factory=list)
 
 
 class SceneLayer(BaseModel):

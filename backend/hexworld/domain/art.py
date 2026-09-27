@@ -257,6 +257,11 @@ class MaterialSpec(BaseModel):
         description="Connectors only: 'dashed' paints a road's dashed centre line and kerbs (streets, "
         "highways), 'rails' two rails with sleepers (railways, tram and cable-car lines), 'none' otherwise.",
     )
+    width: float = Field(
+        default=1.0,
+        description="Connectors only: width relative to the usual (the engine sets it for close-up "
+        "layers; leave 1).",
+    )
     height: int = Field(
         default=1, description="Base relief level 0-4 (liquids 0, plains 1, hills 2, rock 3+)."
     )
@@ -288,6 +293,7 @@ class MaterialSpec(BaseModel):
         self.rank = int(_clamp(self.rank, 0, 9))
         self.height = int(_clamp(self.height, 0, 4))
         self.elevation = 0 if self.liquid else int(_clamp(self.elevation, 0, 40))
+        self.width = float(_clamp(self.width, 0.5, 4.0))
         self.height_ops = self.height_ops[:3]
         if self.liquid:
             self.height, self.height_ops = 0, []

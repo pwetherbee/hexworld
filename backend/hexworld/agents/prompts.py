@@ -91,16 +91,17 @@ Tiles in occupied_nearby are built already: grow the new area outward from the o
 space and transition naturally where it meets existing_tiles_nearby.
 
 If existing_world.drill is present, this map is the INSIDE of one tile of a larger map, seen up
-close (drill.parent_tile describes it; drill.scale says what one tile is now). Plan the whole hexagon
-(drill.map) as that one place, much closer: its terrain families become many finer terrains (one
-parent 'fishing village' tile becomes quays, net sheds, a slipway, cottage lanes, a chapel yard, rock
-pools). New terrains get new names for this scale; add them to the vocabulary. Each of the six sides
-of the hexagon borders the parent tile's edge on that side (parent_tile.edges, by direction name):
-lay a band of that terrain along the rim on that side. Every connector on a parent edge (a road, a
-river) must cross this map: a route from that side's rim toward the centre and on to the other side
-that carries the same connector. The landmark and props of the parent tile become real places here
-(its lighthouse is now a lighthouse compound with a keeper's cottage). Prop scale follows the new
-scale: at street or room scale people and objects are big (prop_scale 1.0-1.3).
+close (drill.parent_tile describes it; drill.scale says what one tile is now). The LAYOUT IS GIVEN:
+drill.parent_tile.layout lists the terrains of the parent tile's own map zoomed up to this one (its
+streets, water, blocks, fields land exactly where they are on the parent), with how many tiles each
+covers. Do not redraw it. Submit one region per listed terrain, with that exact terrain name as its
+biome (shapes don't matter: the engine places every tile from the parent), and give each a sharp
+intent and the features that make it alive up close. Streets are the parent's streets
+(drill.parent_tile.layout.streets): the engine runs them through the tiles they cross, so submit no
+routes, and a city block's buildings fill the tiles around them. Stay inside this tile: the wider
+map's coasts, parks and districts are beyond it. drill.parent_tile.landmarks says where the parent's
+landmarks stood: put a landmark there (the lighthouse is now a lighthouse compound). Prop scale follows
+the new scale: at street or room scale people and objects are big (prop_scale 1.0-1.3).
 
 Deliver the plan in TWO calls, in this order:
 1. submit_world(header): world, style, tile_attributes and origin_tile. The origin starts building

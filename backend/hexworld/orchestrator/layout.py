@@ -28,6 +28,7 @@ from hexworld.domain import (
     Layout,
     PlannedTile,
     Region,
+    Route,
     ShapeSpec,
 )
 from hexworld.domain.art import is_building_kind
@@ -101,6 +102,26 @@ def hex_line(a: Hex, b: Hex) -> list[Hex]:
     return out
 
 
+def guided_hints(routes: list[Route], radius: int, centre: Hex = ORIGIN) -> dict[Hex, dict[int, set[str]]]:
+    """Edge connectors of a drilled region's tiles from the parent's traced streets (tile -> edge ->
+    connectors). Both tiles sharing an edge get it; a street leaving the region leads out of its rim
+    tile. The same for the early origin tile as for the rest of the plan."""
+    hints: dict[Hex, dict[int, set[str]]] = {}
+    for route in routes:
+        path = _polyline(route.points)
+        for a, b in zip(path, path[1:], strict=False):
+            if a.distance(centre) > radius:
+                a, b = b, a
+            if a.distance(centre) > radius:
+                continue
+            i = next((k for k in range(6) if a.neighbor(k) == b), None)
+            if i is not None:
+                hints.setdefault(a, {}).setdefault(i, set()).add(route.connector)
+                if b.distance(centre) <= radius:
+                    hints.setdefault(b, {}).setdefault(opposite(i), set()).add(route.connector)
+    return hints
+
+
 def _polyline(points: list[Coord]) -> list[Hex]:
     cells: list[Hex] = []
     for a, b in zip(points, points[1:], strict=False):
@@ -149,6 +170,8 @@ def rasterize(
     occupied: set[Hex],
     connectors: set[str],
     fill_radius: bool = False,
+    guide: dict[Hex, str] | None = None,
+    guide_routes: list[Route] | None = None,
 ) -> Rasterized:
     res = Rasterized(tiles=[])
     owner: dict[Hex, int] = {}  # tile -> region index
@@ -161,6 +184,20 @@ def rasterize(
                 owner.pop(h, None)
             else:
                 owner[h] = i
+    if guide:  # the layout is the parent tile zoomed in: each tile's terrain is given
+        regions = list(layout.regions)
+        by_biome = {r.biome: i for i, r in enumerate(regions) if r.mode == "add"}
+        for h, name in guide.items():
+            if name not in by_biome:
+                by_biome[name] = len(regions)
+                regions.append(
+                    Region(
+                        name=name, biome=name, intent=name.replace("_", " "), shapes=[], feature_density=0.3
+                    )
+                )
+            owner[h] = by_biome[name]
+        # streets are the parent's too (traced); the planner's own routes would invent new ones
+        layout = layout.model_copy(update={"regions": regions, "routes": list(guide_routes or [])})
     marks: dict[Hex, Landmark] = {}
     for lm in layout.landmarks:
         h = Hex(lm.q, lm.r)
@@ -255,7 +292,9 @@ def rasterize(
 
     # routes -> edge hints
     hints: dict[Hex, dict[int, set[str]]] = {}
-    for route in layout.routes:
+    if guide:
+        hints = guided_hints(layout.routes, world_radius, origin)
+    for route in [] if guide else layout.routes:
         if route.connector not in connectors:
             res.notes.append(f"route connector '{route.connector}' is not in connector_vocabulary")
             continue
@@ -268,10 +307,12 @@ def rasterize(
                     hints.setdefault(b, {}).setdefault(opposite(i), set()).add(route.connector)
 
     # prototypes for copy-filled regions: the region's kept tile nearest the origin without extras
+    # (landmarks, routes)
     protos: dict[int, Hex] = {}
     for h in keep:
         i = owner[h]
-        if layout.regions[i].fill != "generate" and i not in protos and h not in marks and h != origin:
+        plain = h not in marks and h not in hints and h != origin  # copies must not carry its routes
+        if layout.regions[i].fill != "generate" and i not in protos and plain:
             protos[i] = h
 
     for h in keep:
@@ -282,7 +323,7 @@ def rasterize(
             res.tiles.append(pt)
             continue
         feats = [f for f in lm.features if not is_building_kind(f)] if lm else _scatter(reg, h)
-        biome = (lm.biome if lm and lm.biome else None) or reg.biome
+        biome = reg.biome if guide else (lm.biome if lm and lm.biome else None) or reg.biome
         edge_hints = [
             EdgeHint(edge=i, terrain=biome, connectors=sorted(cs))
             for i, cs in sorted(hints.get(h, {}).items())

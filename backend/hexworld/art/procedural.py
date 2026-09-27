@@ -606,9 +606,11 @@ def render_ground_full(
     coord: tuple[int, int],
     materials: dict[str, MaterialSpec | dict] | None = None,
     palette: list[str] | None = None,
+    labels_out: list | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """-> (ground RGB uint8 (C, C, 3); packed relief int32 (C, C): level | LIQUID_BIT | facade code
-    << FACADE_SHIFT; facade RGB uint8 (C, C, 3): wall colour of each building pixel)."""
+    << FACADE_SHIFT; facade RGB uint8 (C, C, 3): wall colour of each building pixel).
+    `labels_out`, if given, receives (terrain names, index of the terrain under each pixel (C, C))."""
     canvas = TileCanvas(Hex(*coord), tile_px)
     U = unit(tile_px)
     margin = 16  # so framing and connectors at the rim see what lies beyond it
@@ -699,9 +701,9 @@ def render_ground_full(
         straight = cspec.edges == "straight"
         # straight connectors are cut per pixel on the lattice (they must meet grid streets exactly)
         px_, py_ = (ctx.wx - cx, ctx.wy - cy) if straight else (bx, by)
-        width = U * (0.75 if cspec.liquid else 0.55)
+        width = U * (0.75 if cspec.liquid else 0.55) * cspec.width
         if straight and not cspec.liquid:
-            width = street_half(tile_px)
+            width = street_half(tile_px) * cspec.width
         dist = np.full(bx.shape, 1e9)
         mine = [i for i, cn in conns if cn == cname]
         segs = straight_segments(mine, apothem) if straight else []
@@ -785,6 +787,8 @@ def render_ground_full(
     liquid = np.array([sp.liquid for sp in specs])[mat]
     packed = heights.astype(np.int32) | np.where(liquid, LIQUID_BIT, 0) | (codes << FACADE_SHIFT)
     crop = slice(margin, margin + canvas.C)
+    if labels_out is not None:
+        labels_out.append((list(names), mat[crop, crop].copy()))
     return (
         np.clip(out[crop, crop], 0, 255).astype(np.uint8),
         packed[crop, crop].astype(np.int32),

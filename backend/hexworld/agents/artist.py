@@ -36,10 +36,19 @@ class MaterialArtist:
     """One material artist per terrain; keeps its session so the super's material_feedback can
     come back to the artist who designed it."""
 
-    def __init__(self, kit: AgentKit, *, world: World, name: str, is_connector: bool):
+    def __init__(
+        self,
+        kit: AgentKit,
+        *,
+        world: World,
+        name: str,
+        is_connector: bool,
+        reference: MaterialSpec | None = None,
+    ):
         self.world = world
         self.name = name
         self.is_connector = is_connector
+        self.reference = reference  # this terrain as drawn on the map above (a drilled layer)
         self.holder: dict[str, Any] = {}
         self.renders = 0
         tile_px = world.style.tile_px if world.style else 32
@@ -63,6 +72,12 @@ class MaterialArtist:
                 spec = coerce(MaterialSpec, spec)
             except (ValidationError, ValueError) as e:
                 return {"error": str(e)[:700]}
+            old = self.world.materials.get(self.name)
+            if old is not None and old.buildings is not None and spec.buildings is None:
+                return {
+                    "error": f"'{self.name}' is a built terrain and tiles are laid out around its "
+                    "buildings: keep `buildings` (revise how they look instead)"
+                }
             return submitted(tool_context, self.holder, spec=spec)
 
         self.handle: AgentHandle = kit.agent(
@@ -87,6 +102,12 @@ class MaterialArtist:
             "connectors": list(w.spec.connector_vocabulary) if w.spec else [],
             "scale": w.scale_note or "a tile is a landscape chunk or a city block",
         }
+        if self.reference is not None:
+            payload["on_the_map_above"] = {
+                "note": "this terrain as drawn on the map this layer zooms into: keep its colours, "
+                "character and (if built) its buildings, drawn at this closer scale",
+                "spec": self.reference.model_dump(exclude_defaults=True),
+            }
         self.renders = 0
         res = await self.handle.run([text_part(payload)], parent, max_calls=6)
         return res.get("spec")

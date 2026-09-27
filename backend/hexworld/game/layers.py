@@ -9,13 +9,17 @@ tile of any layer can be looked at: a layered pixel-art scene painted from the t
 from __future__ import annotations
 
 import asyncio
+import math
+import re
 import time
 from typing import TYPE_CHECKING, Any
+
+import numpy as np
 
 from hexworld.art.grid import TileCanvas
 from hexworld.art.paint import pixelize_sprite, style_frame
 from hexworld.art.pixelize import crisp_tile
-from hexworld.art.procedural import render_ground_full
+from hexworld.art.procedural import lattice, render_ground_full, street_half
 from hexworld.art.scene import (
     PAINT_SIZE,
     SCENE_H,
@@ -27,7 +31,9 @@ from hexworld.art.scene import (
     scene_fx,
 )
 from hexworld.domain import (
+    Coord,
     ParentLink,
+    Route,
     Run,
     RunOptions,
     Scene,
@@ -38,7 +44,7 @@ from hexworld.domain import (
     World,
 )
 from hexworld.domain.art import SpriteEntry
-from hexworld.hex import DIRECTION_NAMES, ORIGIN, Hex, ring
+from hexworld.hex import DIRECTION_NAMES, ORIGIN, SQRT3, Hex, ring, within
 from hexworld.telemetry import Tracer, new_id
 
 if TYPE_CHECKING:
@@ -49,7 +55,8 @@ SCENE_VERSION = 2  # 2: painted from a map of the surroundings and a described v
 AVATAR = "traveller"
 SCALE_NOTES = {
     1: "one tile is about a tenth of the overworld tile it lies in: a street corner, a clearing, a "
-    "stretch of shore, a single building's lot or courtyard",
+    "stretch of shore, a single building's lot or courtyard. The streets are the map above's streets "
+    "(connectors through the tiles they cross), so buildings here use street_grid 0 and fill their block",
     2: "one tile is a room, a yard or a corner of a street",
 }
 
@@ -149,15 +156,43 @@ class Layers:
             raise ValueError(f"tile ({q},{r}) isn't built yet")
         assert parent.spec is not None and parent.style is not None
         depth = parent.depth + 1
-        vocab = [t for t in dict.fromkeys([tile.biome or "", *[e.terrain for e in tile.edges or []]]) if t]
-        conns = sorted({c for e in tile.edges or [] for c in e.connectors})
+        guide, routes, marks = await asyncio.to_thread(self._guide, parent, tile, radius)
+        counts: dict[str, int] = {}
+        for v in guide.values():
+            counts[v] = counts.get(v, 0) + 1
+        terrains = ", ".join(
+            f"{_pretty(n)} ({c} tiles)" for n, c in sorted(counts.items(), key=lambda kv: -kv[1])
+        )
+        street_names = sorted({rt.connector for rt in routes})
+        context = self._parent_context(parent, tile)
+        context["layout"] = {
+            "note": "fixed by the parent tile: its own map zoomed up (terrain -> number of tiles)",
+            "terrains": dict(sorted(counts.items(), key=lambda kv: -kv[1])),
+        }
+        if routes:
+            n_street = len({(p.q, p.r) for rt in routes for p in rt.points})
+            context["layout"]["streets"] = (
+                f"the parent's streets run through {n_street} tiles as the {', '.join(street_names)} "
+                "connector (given: don't add routes); the tiles either side are the blocks"
+            )
+        context["landmarks"] = marks
+        vocab = [
+            t for t in dict.fromkeys([*counts, tile.biome or "", *[e.terrain for e in tile.edges or []]]) if t
+        ]
+        conns = sorted({c for e in tile.edges or [] for c in e.connectors} | set(street_names))
+        up_close = (
+            f"The inside of one tile of the map above, up close: {(tile.summary or _pretty(tile.biome)).rstrip('.')}. "
+            f"Its layout is that tile's own map zoomed in: {terrains}"
+            + (f", crossed by the parent's {', '.join(map(_pretty, street_names))}" if routes else "")
+            + ". Nothing else from the wider map (its coasts, parks, districts) is inside this region."
+        )
         name = f"{parent.name} › {_pretty(tile.biome).title()}"
         child = World(
             id=new_id("w"),
             name=name,
             radius=radius,
             created_at=time.time(),
-            parent=ParentLink(world_id=world_id, q=q, r=r, context=self._parent_context(parent, tile)),
+            parent=ParentLink(world_id=world_id, q=q, r=r, context=context, guide=guide, routes=routes),
             depth=depth,
             scale_note=SCALE_NOTES.get(depth, SCALE_NOTES[2]),
             spec=parent.spec.model_copy(
@@ -165,6 +200,9 @@ class Layers:
                     "title": name,
                     "terrain_vocabulary": vocab,
                     "connector_vocabulary": conns or list(parent.spec.connector_vocabulary[:2]),
+                    # the parent's notes describe the wider map; here they would mislead every agent
+                    "directional_notes": up_close,
+                    "prop_scale": max(parent.spec.prop_scale, 1.0),  # people and things are big up close
                 }
             ),
             style=parent.style.model_copy(deep=True),
@@ -177,6 +215,80 @@ class Layers:
             "world.created", data={"name": child.name, "radius": radius, "parent": world_id, "q": q, "r": r}
         )
         return child, await self._build(child, tile)
+
+    def _guide(
+        self, parent: World, tile: Tile, radius: int
+    ) -> tuple[dict[str, str], list[Route], list[dict[str, Any]]]:
+        """The parent tile's own map, zoomed up to the region: which terrain lies under each region tile
+        (thin things, like rivers and paths, win a tile once they cover half of it), the parent's
+        streets traced as connector routes through the tiles they cross (they all run on the world's
+        street lattice, so each is a straight run), and where the parent's landmarks stood. The
+        region is then the tile up close, not a reinvention."""
+        P = parent.style.tile_px if parent.style else 64
+        labels: list = []
+        edges = [{"terrain": e.terrain, "connectors": list(e.connectors)} for e in tile.edges or []]
+        render_ground_full(
+            tile_px=P,
+            biome=tile.biome or "",
+            edges=edges,
+            coord=(tile.q, tile.r),
+            materials=parent.materials,
+            labels_out=labels,
+        )
+        names, mat = labels[0]
+        conns = list(parent.spec.connector_vocabulary) if parent.spec else []
+        street = next((c for c in conns if re.search(r"street|road|avenue|boulevard|lane", c)), "street")
+
+        def straight(n: str) -> bool:  # streets: on the lattice, traced as routes rather than terrain
+            spec = parent.materials.get(n)
+            if n.startswith("__"):  # the engine's own asphalt (built districts' street grid)
+                return True
+            return n in conns and spec is not None and spec.edges == "straight" and not spec.liquid
+
+        streets = {n: (street if n.startswith("__") else n) for n in names if straight(n)}
+        thin = {n for n in names if n in conns or getattr(parent.materials.get(n), "liquid", False)}
+        canvas = TileCanvas(tile.hex, P)
+        (cx, cy), (ox, oy) = canvas.center, canvas.origin
+        C = mat.shape[0]
+        k = (P / 2) * SQRT3 / 2 / (SQRT3 * (radius + 0.5))  # parent pixels per region tile unit
+        offs = [(dx * 0.3, dy * 0.3) for dx in range(-2, 3) for dy in range(-2, 3) if dx * dx + dy * dy <= 5]
+        guide: dict[str, str] = {}
+        for h in within(ORIGIN, radius):
+            x, y = h.to_pixel(1.0)
+            counts: dict[str, int] = {}
+            for dx, dy in offs:
+                px = min(C - 1, max(0, int(cx + (x + dx) * k - ox)))
+                py = min(C - 1, max(0, int(cy + (y + dy) * k - oy)))
+                n = names[int(mat[py, px])]
+                if n not in streets:  # a street tile is the block it runs through
+                    counts[n] = counts.get(n, 0) + 1
+            total = sum(counts.values())
+            strong = [(c, n) for n, c in counts.items() if n in thin and c / total >= 0.5]
+            if strong:
+                guide[f"{h.q},{h.r}"] = max(strong)[1]
+            elif counts:
+                guide[f"{h.q},{h.r}"] = max(counts.items(), key=lambda kv: kv[1])[0]
+        fill = max(set(guide.values()), key=list(guide.values()).count) if guide else tile.biome or ""
+        for h in within(ORIGIN, radius):  # all street (a crossing): the neighbours' block
+            key = f"{h.q},{h.r}"
+            if key not in guide:
+                around = [guide[f"{n.q},{n.r}"] for n in h.neighbors() if f"{n.q},{n.r}" in guide]
+                guide[key] = max(set(around), key=around.count) if around else fill
+        routes: list[Route] = []
+        idx = np.array([n in streets for n in names])
+        by_name: dict[str, np.ndarray] = {}
+        for i, n in enumerate(names):
+            if idx[i]:
+                by_name[streets[n]] = by_name.get(streets[n], np.zeros(mat.shape, bool)) | (mat == i)
+        for cname, mask in by_name.items():
+            for chain in street_chains(mask, (ox, oy), (cx, cy), k, radius, P):
+                routes.append(Route(connector=cname, points=[Coord(q=h.q, r=h.r) for h in chain]))
+        marks = []
+        for la in tile.layers:
+            if la.kind == "sprite" and la.label and la.role == "landmark":
+                x, y = la.x * (P / 2) / k, la.y * (P / 2) / k  # parent tile units -> region units
+                marks.append({"kind": la.label, **_nearest_hex(x, y, radius)})
+        return guide, routes, marks
 
     async def _build(self, child: World, tile: Tile) -> Run:
         prompt = (
@@ -476,3 +588,95 @@ def _toward_centre(h: Hex, radius: int) -> Hex:
     elif dy <= dz:
         rz = -rx - ry
     return Hex(rx, rz)
+
+
+def _nearest_hex(x: float, y: float, radius: int) -> dict[str, int]:
+    """The hex (pointy-top, circumradius 1) containing a point, clamped inside the region."""
+    fq, fr = (SQRT3 / 3 * x - y / 3), (2 / 3 * y)
+    h = _round_hex(fq, fr)
+    while h.distance(ORIGIN) > radius:
+        h = _toward_centre(h, radius)
+    return {"q": h.q, "r": h.r}
+
+
+def _round_hex(fq: float, fr: float) -> Hex:
+    fs = -fq - fr
+    q, r, s_ = round(fq), round(fr), round(fs)
+    dq, dr, ds = abs(q - fq), abs(r - fr), abs(s_ - fs)
+    if dq > dr and dq > ds:
+        q = -r - s_
+    elif dr > ds:
+        r = -q - s_
+    return Hex(q, r)
+
+
+def street_chains(
+    mask: np.ndarray,
+    origin: tuple[float, float],
+    centre: tuple[float, float],
+    k: float,
+    radius: int,
+    tile_px: int,
+) -> list[list[Hex]]:
+    """The streets of a parent tile (`mask`: its street pixels on the tile canvas at `origin`), as
+    chains of region tiles (`k` parent pixels per region unit, region centred on `centre`). Every
+    street runs on the world lattice (art.procedural.lattice), so walking each lattice line across the
+    tile finds the centre lines: long runs of street pixels (short ones are a perpendicular street's
+    crossing). Horizontal runs follow a row of region tiles; vertical ones zig-zag up a column (the
+    engine's straight connectors draw those legs as right angles). A street reaching the region's rim
+    keeps one tile beyond it, so the rim tile's connector leads out of the region."""
+    (ox, oy), (cx, cy) = origin, centre
+    C = mask.shape[0]
+    lx, ly = lattice(tile_px)
+    step = 0.5
+    min_run = 2 * street_half(tile_px) + 2
+
+    def runs(xs: np.ndarray, ys: np.ndarray) -> list[tuple[int, int]]:
+        px, py = np.floor(xs - ox).astype(int), np.floor(ys - oy).astype(int)
+        ok = (px >= 0) & (px < C) & (py >= 0) & (py < C)
+        on = np.zeros(len(xs), bool)
+        on[ok] = mask[py[ok], px[ok]]
+        out, start = [], None
+        for i, v in enumerate([*on, False]):
+            if v and start is None:
+                start = i
+            elif not v and start is not None:
+                if (i - 1 - start) * step >= min_run:
+                    out.append((start, i - 1))
+                start = None
+        return out
+
+    chains = []
+    ts_y, ts_x = np.arange(oy, oy + C, step), np.arange(ox, ox + C, step)
+    for i in range(math.ceil(ox / lx), math.floor((ox + C) / lx) + 1):
+        for a, b in runs(np.full_like(ts_y, i * lx), ts_y):
+            chains.append(_walk((i * lx - cx) / k, (ts_y[a] - cy) / k, (ts_y[b] - cy) / k, radius, True))
+    for j in range(math.ceil(oy / ly), math.floor((oy + C) / ly) + 1):
+        for a, b in runs(ts_x, np.full_like(ts_x, j * ly)):
+            chains.append(_walk((j * ly - cy) / k, (ts_x[a] - cx) / k, (ts_x[b] - cx) / k, radius, False))
+    # streets along the parent's own rim are shared with its neighbours: they stay outside
+    return [c for c in chains if sum(h.distance(ORIGIN) <= radius for h in c) >= 2]
+
+
+def _walk(fixed: float, t0: float, t1: float, radius: int, vertical: bool) -> list[Hex]:
+    """Region tiles along one straight street (region units), snapped to a tile row or column."""
+    if vertical:  # a column of half-tiles; nudged off the vertical edges between tiles
+        fixed = round(fixed / (SQRT3 / 2)) * (SQRT3 / 2) + 0.01
+    else:
+        fixed = round(fixed / 1.5) * 1.5
+
+    def at(t: float) -> Hex:
+        x, y = (fixed, t) if vertical else (t, fixed)
+        return _round_hex(SQRT3 / 3 * x - y / 3, 2 / 3 * y)
+
+    lo, hi = min(t0, t1), max(t0, t1)
+    if at(lo).distance(ORIGIN) >= radius:  # leaving the region: on to the tile beyond the rim
+        lo -= 1.0
+    if at(hi).distance(ORIGIN) >= radius:
+        hi += 1.0
+    cells: list[Hex] = []
+    for t in np.arange(lo, hi + 1e-9, 0.1):
+        h = at(float(t))
+        if h.distance(ORIGIN) <= radius + 1 and (not cells or cells[-1] != h):
+            cells.append(h)
+    return cells

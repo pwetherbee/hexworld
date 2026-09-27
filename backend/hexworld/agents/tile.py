@@ -58,13 +58,18 @@ def _described_bounds(attrs: list[AttributeDef]) -> list[AttributeDef]:
 
 
 def normalize_design(
-    design: TileDesign, world: World, accepted_facing: dict[int, EdgeSpec]
+    design: TileDesign,
+    world: World,
+    accepted_facing: dict[int, EdgeSpec],
+    given: dict[int, set[str]] | None = None,
 ) -> tuple[TileDesign, dict[str, Any]]:
     """Deterministically repair what can be repaired, and report every change (observability).
 
     - edges facing accepted neighbors are forced to match them exactly (continuity contract)
     - unknown terrains/connectors are coerced to the biome / dropped
     - numeric attributes are clamped; missing attributes get safe defaults
+    - in a drilled layer the parent's traced streets are the only streets: `given` (edge -> its
+      street connectors) replaces whatever the agent drew with those connectors
     """
     assert world.spec is not None
     terrains = set(world.spec.terrain_vocabulary)
@@ -87,6 +92,12 @@ def normalize_design(
         if terrain != e.terrain:
             report["coerced"].append(f"edge{i} {e.terrain}->{terrain}")
         conns = sorted({c for c in e.connectors if c in connectors})
+        if given is not None:
+            fixed = {rt.connector for rt in world.parent.routes} if world.parent else set()
+            want = sorted({c for c in conns if c not in fixed} | given.get(i, set()))
+            if want != conns:
+                report["coerced"].append(f"edge{i} connectors {conns}->{want} (the parent's streets)")
+            conns = want
         edges.append(EdgeSpec(terrain=terrain, connectors=conns))
 
     attrs: dict[str, Any] = {}

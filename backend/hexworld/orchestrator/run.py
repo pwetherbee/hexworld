@@ -63,6 +63,7 @@ from hexworld.domain import (
     Coord,
     CopySpec,
     Directive,
+    EdgeHint,
     EdgeSpec,
     Layout,
     PlannedTile,
@@ -80,7 +81,7 @@ from hexworld.domain import (
 from hexworld.domain.art import MaterialSpec, PackItem, ScatterSpec, SpriteEntry, is_building_kind, kind_key
 from hexworld.hex import DIRECTION_NAMES, ORIGIN, Hex, opposite
 from hexworld.orchestrator.copies import apply_copy, copy_fits, resolve_root, sync_shallow_copies
-from hexworld.orchestrator.layout import Rasterized, rasterize
+from hexworld.orchestrator.layout import Rasterized, guided_hints, rasterize
 from hexworld.orchestrator.validators import CheckResult, check_candidate
 from hexworld.telemetry import Span, Tracer
 
@@ -325,6 +326,10 @@ class RunExecutor:
                 occupied=occupied_set,
                 connectors=vocab_c,
                 fill_radius=opts.fill_radius,
+                guide={
+                    Hex(*map(int, k.split(","))): v for k, v in (w.parent.guide if w.parent else {}).items()
+                },
+                guide_routes=w.parent.routes if w.parent else None,
             )
 
         async with self.tracer.span("super.plan", root, max_tiles=opts.max_tiles) as sp:
@@ -405,7 +410,22 @@ class RunExecutor:
         conns = set(w.spec.connector_vocabulary)
         dups = self._sanitize_duplicates(plan)
         fixed: list[PlannedTile] = []
+        # a drilled region is its parent tile up close: terrain and streets come from the parent (the
+        # early origin tile too, which the planner writes before any layout exists)
+        guide = w.parent.guide if w.parent else {}
+        streets = guided_hints(w.parent.routes, w.radius) if w.parent and w.parent.routes else {}
         for pt in plan.tiles:
+            if guide.get(pt.hex.key) and pt.biome != guide[pt.hex.key]:
+                pt = pt.model_copy(update={"biome": guide[pt.hex.key]})
+            if pt.hex in streets:
+                pt = pt.model_copy(
+                    update={
+                        "edge_hints": [
+                            EdgeHint(edge=i, terrain=pt.biome, connectors=sorted(cs))
+                            for i, cs in sorted(streets[pt.hex].items())
+                        ]
+                    }
+                )
             biome = pt.biome if pt.biome in vocab else vocab[len(vocab) // 2]
             hints = [
                 h.model_copy(
@@ -543,8 +563,13 @@ class RunExecutor:
         async def make() -> MaterialSpec:
             async with self.tracer.span("library.material", parent, material=name) as sp:
                 try:
+                    up = self.store.get_world(w.parent.world_id) if w.parent else None
                     mat_artist = artist.MaterialArtist(
-                        self.kit, world=w, name=name, is_connector=is_connector
+                        self.kit,
+                        world=w,
+                        name=name,
+                        is_connector=is_connector,
+                        reference=up.materials.get(name) if up else None,
                     )
                     self._material_artists[name] = mat_artist
                     spec = await mat_artist.design(parent=sp)
@@ -766,6 +791,17 @@ class RunExecutor:
             self.store.put_world(self.world)
 
     def _with_ambient(self, terrain: str, spec: MaterialSpec) -> MaterialSpec:
+        """A material as it enters the library (every path: design, revision, ambient extras)."""
+        b = spec.buildings
+        if self.world.depth > 0 and b is not None:
+            # up close, streets are the parent's streets (traced), not a finer grid of their own, and
+            # a tile holds a building or two, not a block of them
+            fit = {"street_grid": 0, "lot_px": max(b.lot_px, LOT_PX_UP_CLOSE)}
+            if any(getattr(b, k) != v for k, v in fit.items()):
+                spec = spec.model_copy(update={"buildings": b.model_copy(update=fit)})
+        conns = self.world.spec.connector_vocabulary if self.world.spec else []
+        if self.world.depth > 0 and terrain in conns and spec.edges == "straight" and not spec.liquid:
+            spec = spec.model_copy(update={"width": STREET_WIDTH_UP_CLOSE})  # the parent's avenue, zoomed
         have = {s.kind for s in spec.scatter}
         extra = [e for e in self._ambient.get(terrain, []) if e.kind not in have]
         return spec.model_copy(update={"scatter": [*spec.scatter, *extra]}) if extra else spec
@@ -1998,7 +2034,14 @@ class RunExecutor:
                     job.feedback = None
                     if design is None:
                         raise RuntimeError("tile agent did not submit a design")
-                    design, norm = tile_agent.normalize_design(design, world, facing)
+                    given = None
+                    if world.parent and world.parent.routes:
+                        traced = {rt.connector for rt in world.parent.routes}
+                        given = {
+                            eh.edge: {c for c in eh.connectors if c in traced}
+                            for eh in job.directive.edge_hints
+                        }
+                    design, norm = tile_agent.normalize_design(design, world, facing, given)
                     dsp.set(biome=design.biome, summary=design.summary, normalization=norm)
                 attempt.design = design
 
@@ -2414,6 +2457,10 @@ class RunExecutor:
     def _raise_budget(self) -> None:
         if self._budget_error is not None:
             raise self._budget_error
+
+
+LOT_PX_UP_CLOSE = 28  # building footprint in a drilled layer (a tile is about one lot)
+STREET_WIDTH_UP_CLOSE = 3.5  # a street in a drilled layer, relative to the overworld's
 
 
 def _seed(*parts: Any) -> int:

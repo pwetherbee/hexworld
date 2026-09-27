@@ -1,4 +1,4 @@
-from hexworld.domain import Layout, PlannedTile, ShapeSpec
+from hexworld.domain import Coord, Layout, PlannedTile, ShapeSpec
 from hexworld.hex import ORIGIN, Hex
 from hexworld.orchestrator.layout import hex_line, rasterize, shape_cells
 
@@ -129,3 +129,36 @@ def test_stray_fragments_are_dropped_but_islands_kept():
     assert (-3, 0) in got and (-2, 0) in got  # a near fragment is joined to the map
     assert any("stray" in n for n in res.notes) and any("joined" in n for n in res.notes)
     assert Hex(0, 0).distance(Hex(6, 0)) == 6
+
+
+def test_a_guide_fixes_every_tiles_terrain():
+    from hexworld.hex import within
+
+    guide = {h: ("street" if h.q == 0 or h.r == 0 else "block") for h in within(ORIGIN, 2)}
+    layout = Layout.model_validate(
+        {"regions": [{"name": "offices", "biome": "block", "intent": "office towers", "shapes": []}]}
+    )
+    res = rasterize(
+        layout,
+        origin=ORIGIN,
+        origin_tile=None,
+        max_tiles=40,
+        world_radius=2,
+        occupied=set(),
+        connectors=set(),
+        fill_radius=True,
+        guide=guide,
+    )
+    got = {Hex(t.q, t.r): t.biome for t in res.tiles}
+    assert got == guide  # the planner's shapes don't matter; unplanned terrains still get a region
+
+
+def test_guided_hints_join_both_sides_and_lead_out_of_the_rim():
+    from hexworld.domain import Route
+    from hexworld.orchestrator.layout import guided_hints
+
+    row = [Coord(q=q, r=0) for q in range(-3, 4)]  # radius 2: one tile past the rim each way
+    hints = guided_hints([Route(connector="street", points=row)], 2)
+    assert set(hints) == {Hex(q, 0) for q in range(-2, 3)}
+    assert hints[ORIGIN] == {0: {"street"}, 3: {"street"}}
+    assert hints[Hex(2, 0)] == {0: {"street"}, 3: {"street"}}  # the east rim tile leads out

@@ -77,6 +77,32 @@ export interface ParentLink {
   context: {
     [k: string]: unknown;
   };
+  guide: {
+    [k: string]: string;
+  };
+  routes: Route[];
+}
+/**
+ * This interface was referenced by `ApiSchemas`'s JSON-Schema
+ * via the `definition` "Route".
+ */
+export interface Route {
+  /**
+   * From connector_vocabulary (river, road, corridor...).
+   */
+  connector: string;
+  /**
+   * >= 2 waypoints; the route runs tile to tile between them.
+   */
+  points: Coord[];
+}
+/**
+ * This interface was referenced by `ApiSchemas`'s JSON-Schema
+ * via the `definition` "Coord".
+ */
+export interface Coord {
+  q: number;
+  r: number;
 }
 /**
  * This interface was referenced by `ApiSchemas`'s JSON-Schema
@@ -207,6 +233,10 @@ export interface MaterialSpec {
    * Connectors only: 'dashed' paints a road's dashed centre line and kerbs (streets, highways), 'rails' two rails with sleepers (railways, tram and cable-car lines), 'none' otherwise.
    */
   markings: "none" | "dashed" | "rails";
+  /**
+   * Connectors only: width relative to the usual (the engine sets it for close-up layers; leave 1).
+   */
+  width: number;
   /**
    * Base relief level 0-4 (liquids 0, plains 1, hills 2, rock 3+).
    */
@@ -562,14 +592,6 @@ export interface TileLayer {
   fps: number;
   motion: "none" | "sway" | "bob" | "flicker" | "pulse";
   role: ("landmark" | "prop" | "scatter") | null;
-}
-/**
- * This interface was referenced by `ApiSchemas`'s JSON-Schema
- * via the `definition` "Coord".
- */
-export interface Coord {
-  q: number;
-  r: number;
 }
 /**
  * What the super asks of one tile agent (derived from a PlannedTile, plus retry feedback).

@@ -31,3 +31,29 @@ async def test_entering_a_tile_builds_its_region_and_scenes_are_painted_once(mak
     assert rt.store.get_asset(scene.layers[0].asset_id)
     assert (await rt.layers.scene(child.id, 1, 0)).created_at == scene.created_at  # painted once
     assert all(w.depth == 0 for w in [rt.store.get_world(world.id)])
+
+
+def test_a_parents_streets_become_straight_chains_of_region_tiles():
+    import numpy as np
+
+    from hexworld.art.grid import TileCanvas
+    from hexworld.art.procedural import street_half
+    from hexworld.game.layers import street_chains
+    from hexworld.hex import ORIGIN, SQRT3, Hex
+
+    P, R = 64, 3
+    canvas = TileCanvas(ORIGIN, P)
+    (cx, cy), (ox, oy) = canvas.center, canvas.origin
+    C = canvas.C
+    ys, xs = np.mgrid[0:C, 0:C] + 0.5
+    wx, wy = xs + ox, ys + oy
+    half = street_half(P)
+    mask = (np.abs(wy - cy) < half) | ((np.abs(wx - cx) < half) & (wy < cy))  # a T: E-W road, north leg
+    k = (P / 2) * SQRT3 / 2 / (SQRT3 * (R + 0.5))
+    chains = street_chains(mask, (ox, oy), (cx, cy), k, R, P)
+    assert len(chains) == 2
+    row = next(c for c in chains if all(h.r == 0 for h in c))
+    assert row[0] == Hex(-R - 1, 0) and row[-1] == Hex(R + 1, 0)  # leads out of the region both ways
+    leg = next(c for c in chains if c is not row)
+    assert all(a.distance(b) == 1 for a, b in zip(leg, leg[1:], strict=False))
+    assert Hex(0, 0) in leg and min(h.r for h in leg) == -R - 1 and max(h.r for h in leg) <= 0
