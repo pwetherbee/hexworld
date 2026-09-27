@@ -28,7 +28,7 @@ import numpy as np
 from hexworld.agents.themes import base_color, hex_to_rgb, rgb_to_hex, shade
 from hexworld.art.grid import TileCanvas
 from hexworld.art.relief import FACADE_SHIFT, LIQUID_BIT, MAX_LEVEL, facade_code, relief_shade
-from hexworld.domain.art import BuildingsSpec, MaterialSpec, PatternOp
+from hexworld.domain.art import BuildingsSpec, Lens, MaterialSpec, PatternOp
 from hexworld.hex import DIRECTION_ANGLES, SQRT3, Hex
 
 RAMP_FACTORS = {"outline": 0.42, "dark": 0.72, "base": 1.0, "light": 1.24, "hi": 1.5}
@@ -324,6 +324,8 @@ def paint_material(img: np.ndarray, m: np.ndarray, ctx: Ctx, spec: MaterialSpec,
         g = _hash(np.floor(ctx.wx / 2), np.floor(ctx.wy / 2), _seed(name, 999))
         img[m & (g < 0.13)] = down
         img[m & (g > 0.93)] = up
+    if spec.lens is not None and spec.lens.ops:
+        _paint_lens(img, m, ctx, spec, R)
     for i, op in enumerate(spec.ops):
         seed = _seed(name, i)
         sc = op.scale * ctx.k
@@ -375,6 +377,32 @@ def paint_material(img: np.ndarray, m: np.ndarray, ctx: Ctx, spec: MaterialSpec,
                         img[r, c] = R[px.tone]
 
 
+LENS_OPS = ("patches", "cellfill")  # the parent's large-scale patterns (blobs), seen up close
+LENS_MIN_SCALE = 12  # smaller parent patterns are texture, not structure
+
+
+def _paint_lens(img: np.ndarray, m: np.ndarray, ctx: Ctx, spec: MaterialSpec, R: Ramp) -> None:
+    """The parent's big patterns (clumps, clearings, fields, bands) under this layer's texture: each
+    is evaluated at parent coordinates, so a patch the parent drew across a few pixels becomes a
+    broad area here, painted in the matching tone of this material's own ramp."""
+    lens = spec.lens
+    assert lens is not None
+    # this layer's blocks (its pixel grain), placed in the parent's world
+    wx, wy = lens.x + ctx.bcx / lens.factor, lens.y + ctx.bcy / lens.factor
+    B = block_size(round(lens.k * 64))
+    for i, op in enumerate(lens.ops):
+        if op.op not in LENS_OPS or op.scale < LENS_MIN_SCALE:
+            continue
+        seed = _seed(lens.source, i)
+        sc = op.scale * lens.k
+        if op.op == "patches":
+            sel = value_noise(wx, wy, max(sc, B * 1.5), seed) > 1 - op.amount * 0.8
+        else:
+            sel = voronoi(wx, wy, max(sc, B * 1.5), seed)[2] < op.amount
+        tone = op.tone if op.tone in TONES else spec.base_tone
+        img[m & sel] = R[tone]
+
+
 def _shift(arr: np.ndarray, dy: int, dx: int) -> np.ndarray:
     """arr value at (row + dy, col + dx), edge-clamped."""
     H, W = arr.shape
@@ -405,28 +433,21 @@ def frame_blocks(img: np.ndarray, mat: np.ndarray, heights: np.ndarray, ctx: Ctx
 
 
 FLOOR_LEVELS = 1  # relief levels per building floor (1 level = 0.055 world units in 3D)
+MAX_ZOOM_LEVELS = 120  # a zoomed building's height cap (relief levels)
+LENS_ELEVATION = 0.5  # landforms up close rise less steeply than buildings (share of `levels`)
 
 
 def _hex_rgb(c: str) -> np.ndarray:
     return np.array(hex_to_rgb(c), dtype=np.float32)
 
 
-def paint_buildings(
-    img: np.ndarray,
-    heights: np.ndarray,
-    facade: np.ndarray,
-    codes: np.ndarray,
-    m: np.ndarray,
-    ctx: Ctx,
-    b: BuildingsSpec,
-    name: str,
-) -> None:
-    """Raise buildings out of this material's ground: footprints on a world-aligned lot grid (so
-    buildings continue across tiles), floors per lot (skewed low, with a skyline share of tall ones),
-    roofs painted into the ground, wall colours and facade codes for the 3D facades."""
-    seed = _seed(name, 777)
-    k = ctx.k
-    px, py = np.floor(ctx.wx), np.floor(ctx.wy)
+def _lot_grid(
+    wx: np.ndarray, wy: np.ndarray, k: float, b: BuildingsSpec, snap: bool
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, float, float, float, float, float]:
+    """The lot grid at world coords (wx, wy): (col, row, x and y inside the lot, footprint bounds
+    x0, x1, y0, y1, lot size, gap). `snap` floors to whole world pixels (a layer's own buildings);
+    a zoomed layer keeps the fractions so footprint edges fall between its finer pixels."""
+    px, py = (np.floor(wx), np.floor(wy)) if snap else (wx, wy)
     lot = max(6.0, round(b.lot_px * k))
     gap = max(1.0, round(b.gap_px * k))
     if b.layout == "rows":
@@ -443,13 +464,13 @@ def paint_buildings(
     else:  # blocks
         sx, sy, stagger = lot, max(6.0, round(lot * 0.8)), lot / 2
     if b.street_grid > 0:  # blocks between the lattice streets (painted by the caller), lots inside
-        P = round(ctx.k * 64)
+        P = round(k * 64)
         X, Y = lattice(P)
         half = street_half(P)
         cw, ch = X * b.street_grid, Y * b.street_grid
         # lattice lines pass through world 0, so block i spans [i*cw + half, (i+1)*cw - half]
-        bx, by = np.floor(ctx.wx / cw), np.floor(ctx.wy / ch)
-        ix, iy = ctx.wx - bx * cw - half, ctx.wy - by * ch - half
+        bx, by = np.floor(wx / cw), np.floor(wy / ch)
+        ix, iy = wx - bx * cw - half, wy - by * ch - half
         iw, ih = cw - 2 * half, ch - 2 * half
         nx, ny = max(1, round(iw / sx)), max(1, round(ih / sy))  # whole lots per block, no slivers
         sx, sy = iw / nx, ih / ny
@@ -461,32 +482,63 @@ def paint_buildings(
         x = px + (row % 2) * stagger
         col = np.floor(x / sx)
         lx, ly = x - col * sx, py - row * sy
-    # footprint bounds inside the lot
     if b.layout == "rows":
         x0, x1, y0, y1 = 0.0, sx, gap, sy
     elif b.layout == "blocks":
         x0, x1, y0, y1 = gap, sx, gap, sy
     else:
         x0, x1, y0, y1 = gap, sx - gap, gap, sy - gap
+    return col, row, lx, ly, x0, x1, y0, y1, lot, gap
+
+
+def paint_buildings(
+    img: np.ndarray,
+    heights: np.ndarray,
+    facade: np.ndarray,
+    codes: np.ndarray,
+    m: np.ndarray,
+    ctx: Ctx,
+    b: BuildingsSpec,
+    name: str,
+    lens: Lens | None = None,
+) -> None:
+    """Raise buildings out of this material's ground: footprints on a world-aligned lot grid (so
+    buildings continue across tiles), floors per lot (skewed low, with a skyline share of tall ones),
+    roofs painted into the ground, wall colours and facade codes for the 3D facades. Through a lens
+    (a drilled layer) the lots are the parent tile's: the same buildings, now much bigger."""
+    z = lens if lens is not None and lens.buildings is not None else None
+    src = z.buildings if z is not None and z.buildings is not None else b  # layout, floors, coverage
+    seed = _seed(z.source if z is not None else name, 777)
+    k = ctx.k
+    px, py = np.floor(ctx.wx), np.floor(ctx.wy)
+    if z is not None:
+        col, row, lx, ly, x0, x1, y0, y1, lot, gap = _lot_grid(
+            z.x + ctx.wx / z.factor, z.y + ctx.wy / z.factor, z.k, src, snap=False
+        )
+        unit, lv = z.factor, z.levels  # layer pixels per lot unit; levels per floor
+    else:
+        col, row, lx, ly, x0, x1, y0, y1, lot, gap = _lot_grid(ctx.wx, ctx.wy, k, b, snap=True)
+        unit, lv = 1.0, float(FLOOR_LEVELS)
     inside = (lx >= x0) & (lx < x1) & (ly >= y0) & (ly < y1)
-    if b.layout == "compound":  # a walled ring around a courtyard, taller corners
+    if src.layout == "compound":  # a walled ring around a courtyard, taller corners
         w = max(3.0, round(lot / 4))
         court = (lx >= x0 + w) & (lx < x1 - w) & (ly >= y0 + w) & (ly < y1 - w)
         inside &= ~court
     lid = _hash(col, row, seed)
-    built = m & inside & (lid < b.coverage)
+    built = m & inside & (lid < src.coverage)
     if not built.any():
         return
     h2, h3 = _hash(col, row, seed + 1.3), _hash(col, row, seed + 2.9)
-    span = b.floors_max - b.floors_min
-    tall = h2 < b.tall_share
+    span = src.floors_max - src.floors_min
+    tall = h2 < src.tall_share
     floors = np.where(
-        tall, b.floors_max - np.floor(h3 * 0.25 * span), b.floors_min + np.floor(span * 0.6 * h3**2)
+        tall, src.floors_max - np.floor(h3 * 0.25 * span), src.floors_min + np.floor(span * 0.6 * h3**2)
     )
-    # edge distance inside the footprint (parapets, ridges, stepped terraces)
-    dl = np.minimum(np.minimum(lx - x0, x1 - 1 - lx), np.minimum(ly - y0, y1 - 1 - ly))
+    # edge distance inside the footprint, in this layer's pixels (parapets, ridges, terraces)
+    e = 1 / unit  # one layer pixel, in lot units
+    dl = np.floor(np.minimum(np.minimum(lx - x0, x1 - e - lx), np.minimum(ly - y0, y1 - e - ly)) * unit)
     extra = np.zeros_like(heights)
-    if b.layout == "compound":
+    if src.layout == "compound":
         corner = (np.minimum(lx - x0, x1 - 1 - lx) < w) & (np.minimum(ly - y0, y1 - 1 - ly) < w)
         extra += np.where(corner, 2 * FLOOR_LEVELS, 0)
     if b.roof == "parapet":
@@ -494,13 +546,13 @@ def paint_buildings(
     elif b.roof == "terrace":
         extra += np.where(dl >= max(2.0, round(2 * k)), FLOOR_LEVELS * 2, 0)
     elif b.roof == "gabled":
-        mid = (y0 + y1 - 1) / 2
-        extra += np.where(np.abs(ly - mid) < 1.0, 1, 0)
+        mid = (y0 + y1 - e) / 2
+        extra += np.where(np.abs(ly - mid) * unit < 1.0, 1, 0)
     if b.clutter > 0 and b.roof in ("flat", "parapet", "terrace"):  # vents, tanks, AC boxes
         cx_, cy_ = np.floor(px / 4), np.floor(py / 4)
         box = (_hash(cx_, cy_, seed + 5.5) < b.clutter * 0.18) & (px % 4 < 2) & (py % 4 < 2) & (dl >= 2)
         extra += np.where(box, 1, 0)
-    heights[built] += floors[built] * FLOOR_LEVELS + extra[built]
+    heights[built] += np.minimum(floors[built] * lv, MAX_ZOOM_LEVELS) + extra[built]
 
     # roofs
     roofs = [_hex_rgb(c) for c in b.roof_colors]
@@ -508,9 +560,12 @@ def paint_buildings(
     roof = np.stack(roofs)[ridx]
     shade_ = np.ones(heights.shape, np.float32)
     if b.roof == "gabled":
-        mid = (y0 + y1 - 1) / 2
+        mid = (y0 + y1 - e) / 2
         shade_ = np.where(ly > mid, 0.8, 1.08)  # north slope lit, south slope in shade
     shade_ = np.where(dl < 1, shade_ * 0.82, shade_)  # the roof's rim
+    if z is not None:  # a roof seen up close: panels and seams rather than one flat colour
+        seam = (np.mod(px, 9) == 0) | (np.mod(py, 7) == 0)
+        shade_ = np.where(seam & (dl >= 2), shade_ * 0.9, shade_)
     shade_ = np.where(extra >= 1, shade_ * 1.12, shade_)
     img[built] = np.minimum(255, roof[built] * shade_[built][:, None])
 
@@ -540,14 +595,26 @@ def elevation_field(ctx: Ctx, mat: np.ndarray, specs: list[MaterialSpec]) -> np.
     shaped by ridged world-space noise (peaks, saddles, spurs). The blend only reaches ~7px, which
     both tiles sharing an edge render identically, so relief stays continuous across the seam.
     Liquids stay flat."""
-    target = np.array([float(sp.elevation) for sp in specs])[mat]
+    lens = next((sp.lens for sp in specs if sp.lens is not None), None)
+    target = np.array(
+        [
+            sp.lens.elevation * sp.lens.levels * LENS_ELEVATION  # the parent's landform, up close
+            if sp.lens is not None and sp.lens.elevation is not None
+            else float(sp.elevation)
+            for sp in specs
+        ]
+    )[mat]
     if not target.any():
         return np.zeros(mat.shape, np.float32)
     wet = np.array([sp.liquid for sp in specs])[mat]
     smooth = _blur(target, ELEV_SIGMA)
-    s = 18.0 * ctx.k
-    n1 = value_noise(ctx.wx, ctx.wy, s * 2.2, 71.0)
-    n2 = value_noise(ctx.wx, ctx.wy, s, 73.0)
+    # ridges at the parent's scale when zoomed in (one landform across the region, not one per tile)
+    if lens is not None:
+        wx, wy, s = lens.x + ctx.wx / lens.factor, lens.y + ctx.wy / lens.factor, 18.0 * lens.k
+    else:
+        wx, wy, s = ctx.wx, ctx.wy, 18.0 * ctx.k
+    n1 = value_noise(wx, wy, s * 2.2, 71.0)
+    n2 = value_noise(wx, wy, s, 73.0)
     ridge = 1 - np.abs(2 * (0.65 * n1 + 0.35 * n2) - 1)  # 0..1, sharp crests
     shape = 0.45 + 0.55 * ridge**1.5
     elev = smooth * shape
@@ -751,7 +818,7 @@ def render_ground_full(
             paint_material(img, m, ctx, specs[k], ramps[k], name)
             heights[m] = material_heights(ctx, specs[k], name)[m]
             if specs[k].buildings is not None:
-                paint_buildings(img, heights, facade, codes, m, ctx, specs[k].buildings, name)
+                paint_buildings(img, heights, facade, codes, m, ctx, specs[k].buildings, name, specs[k].lens)
     heights += elevation_field(ctx, mat, specs)
     heights = np.clip(np.rint(heights), 0, MAX_LEVEL)
     frame_blocks(img, mat, heights, ctx, specs, ramps)

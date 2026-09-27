@@ -221,6 +221,24 @@ async def review_wave(
             {
                 "task": "wave_review",
                 "world": world.spec.model_dump() if world.spec else None,
+                **(
+                    {
+                        "up_close": {
+                            "scale": world.scale_note,
+                            "zoom": world.parent.context.get("scale"),
+                            "tiles": {
+                                c["label"]: world.parent.notes.get(f"{c['coord']['q']},{c['coord']['r']}", "")
+                                for c in candidates
+                                if "coord" in c
+                            },
+                            "rule": "this map is one tile of its parent seen up close: the parent's "
+                            "buildings, streets and paths are laid out by the engine at their true size. "
+                            "Never ask for more buildings, blocks, streets or a different land use.",
+                        }
+                    }
+                    if world.parent is not None
+                    else {}
+                ),
                 "your_recent_reviews": history[-12:],
                 "candidates": candidates,
             }

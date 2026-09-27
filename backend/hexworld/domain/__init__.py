@@ -496,6 +496,9 @@ class ParentLink(BaseModel):
     guide: dict[str, str] = Field(default_factory=dict)
     # the parent's streets traced tile by tile (straight connectors through the tiles they cross)
     routes: list[Route] = Field(default_factory=list)
+    # "q,r" -> what the tile is within the parent (for the agents), and the parent's props there
+    notes: dict[str, str] = Field(default_factory=dict)
+    props: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class SceneLayer(BaseModel):

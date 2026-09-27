@@ -263,12 +263,29 @@ class TileAgent:
             ],
             "coord": self.directive.coord.model_dump(mode="json"),
             "directive": self.directive.model_dump(mode="json", exclude={"duplicate", "coord"}),
+            **self._up_close(),
             "neighbors": compact,
         }
         if self.directive.features:
             payload["sprite_library"] = self.api.sprite_kinds()  # painted or being painted
         res = await self.handle.run([text_part(payload)], parent, max_calls=6)
         return res.get("design")
+
+    def _up_close(self) -> dict[str, Any]:
+        """In a drilled layer: the scale, and what this tile is within the parent tile."""
+        w, c = self.world, self.directive.coord
+        if w.parent is None:
+            return {}
+        return {
+            "up_close": {
+                "scale": w.scale_note,
+                "zoom": w.parent.context.get("scale"),
+                "this_tile": w.parent.notes.get(f"{c.q},{c.r}", ""),
+                "rule": "buildings, streets and paths come from the parent's map (the engine lays them "
+                "out): design the ground and life of this spot at this scale, never a block of "
+                "small buildings or a grid of streets",
+            }
+        }
 
     async def revise(self, feedback: str, *, parent: Span | None) -> TileDesign | None:
         """Agent-to-agent feedback: the reviewer's note continues this tile agent's session."""

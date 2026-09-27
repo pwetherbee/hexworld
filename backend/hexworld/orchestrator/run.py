@@ -53,7 +53,13 @@ from hexworld.art.paint import (
     style_frame,
 )
 from hexworld.art.pixelize import PixelTile, crisp_tile, load_tile, pixelize_to_canvas
-from hexworld.art.procedural import fallback_material, ramp_hexes, render_ground_full
+from hexworld.art.procedural import (
+    LENS_MIN_SCALE,
+    LENS_OPS,
+    fallback_material,
+    ramp_hexes,
+    render_ground_full,
+)
 from hexworld.art.relief import facade_codes, levels_to_png, load_heightmap, relief_shade, split_levels
 from hexworld.art.sprites import Placed, SpriteArt, flatten, preview_png, scatter_positions
 from hexworld.domain import (
@@ -78,7 +84,15 @@ from hexworld.domain import (
     WorldHeader,
     WorldPlan,
 )
-from hexworld.domain.art import MaterialSpec, PackItem, ScatterSpec, SpriteEntry, is_building_kind, kind_key
+from hexworld.domain.art import (
+    Lens,
+    MaterialSpec,
+    PackItem,
+    ScatterSpec,
+    SpriteEntry,
+    is_building_kind,
+    kind_key,
+)
 from hexworld.hex import DIRECTION_NAMES, ORIGIN, Hex, opposite
 from hexworld.orchestrator.copies import apply_copy, copy_fits, resolve_root, sync_shallow_copies
 from hexworld.orchestrator.layout import Rasterized, guided_hints, rasterize
@@ -330,6 +344,12 @@ class RunExecutor:
                     Hex(*map(int, k.split(","))): v for k, v in (w.parent.guide if w.parent else {}).items()
                 },
                 guide_routes=w.parent.routes if w.parent else None,
+                guide_notes={
+                    Hex(*map(int, k.split(","))): v for k, v in (w.parent.notes if w.parent else {}).items()
+                },
+                guide_props={
+                    Hex(*map(int, k.split(","))): v for k, v in (w.parent.props if w.parent else {}).items()
+                },
             )
 
         async with self.tracer.span("super.plan", root, max_tiles=opts.max_tiles) as sp:
@@ -417,6 +437,15 @@ class RunExecutor:
         for pt in plan.tiles:
             if guide.get(pt.hex.key) and pt.biome != guide[pt.hex.key]:
                 pt = pt.model_copy(update={"biome": guide[pt.hex.key]})
+            note = w.parent.notes.get(pt.hex.key) if w.parent else None
+            if note and "Up close, this tile is" not in pt.intent:  # the early origin tile
+                props = w.parent.props.get(pt.hex.key, []) if w.parent else []
+                pt = pt.model_copy(
+                    update={
+                        "intent": f"{pt.intent} Up close, this tile is {note}.",
+                        "features": [*props, *pt.features][:3],
+                    }
+                )
             if pt.hex in streets:
                 pt = pt.model_copy(
                     update={
@@ -790,6 +819,33 @@ class RunExecutor:
             self.world.materials[terrain] = self._with_ambient(terrain, mat)
             self.store.put_world(self.world)
 
+    def _through_lens(self, terrain: str, spec: MaterialSpec) -> MaterialSpec:
+        """In a drilled layer every material sees its parent tile through the same lens (see Lens):
+        the parent's buildings, landform and big patterns of the terrain it zooms into carry over,
+        and a terrain that was built above stays built here."""
+        up, w = self._parent_world(), self.world
+        if up is None or w.parent is None or up.style is None or w.style is None:
+            return spec
+        Pp, Pc = up.style.tile_px, w.style.tile_px
+        cx, cy = TileCanvas(Hex(w.parent.q, w.parent.r), Pp).center
+        factor = 2 * Pc * (w.radius + 0.5) / Pp  # the parent tile's apothem spans the region's
+        ref = up.materials.get(terrain)
+        lens = Lens(
+            x=cx,
+            y=cy,
+            factor=factor,
+            k=Pp / 64,
+            levels=factor * LENS_LEVELS,
+            source=terrain if ref is not None else "",
+            buildings=ref.buildings if ref is not None else None,
+            elevation=ref.elevation if ref is not None else None,
+            ops=[op for op in ref.ops if op.op in LENS_OPS and op.scale >= LENS_MIN_SCALE] if ref else [],
+        )
+        update: dict[str, Any] = {"lens": lens}
+        if ref is not None and ref.buildings is not None and spec.buildings is None:
+            update["buildings"] = ref.buildings  # built above, built here (its look is the artist's)
+        return spec.model_copy(update=update)
+
     def _parent_world(self) -> World | None:
         """The world this one is the inside of a tile of (drilled layers), cached."""
         if self.world.parent is None:
@@ -800,6 +856,7 @@ class RunExecutor:
 
     def _with_ambient(self, terrain: str, spec: MaterialSpec) -> MaterialSpec:
         """A material as it enters the library (every path: design, revision, ambient extras)."""
+        spec = self._through_lens(terrain, spec)
         b = spec.buildings
         if self.world.depth > 0 and b is not None:
             # up close, streets are the parent's streets (traced), not a finer grid of their own, and
@@ -2472,6 +2529,7 @@ class RunExecutor:
 
 
 LOT_PX_UP_CLOSE = 28  # building footprint in a drilled layer (a tile is about one lot)
+LENS_LEVELS = 0.5  # relief levels here per parent level, per unit of zoom (buildings, landforms)
 STREET_WIDTH_UP_CLOSE = 3.5  # a street in a drilled layer, relative to the overworld's
 PATH_WIDTH_UP_CLOSE = 1.5  # a winding path or lane (the overworld draws them generously already)
 

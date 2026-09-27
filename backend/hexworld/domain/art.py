@@ -11,6 +11,7 @@ import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
@@ -231,6 +232,26 @@ class BuildingsSpec(BaseModel):
         return self
 
 
+class Lens(BaseModel):
+    """A drilled layer is its parent tile seen up close. Every material there carries the same lens
+    (engine-set): world pixel (wx, wy) of the layer lies at parent world pixel (x + wx / factor,
+    y + wy / factor), the layer's region centred on the parent tile's centre (x, y). The renderer
+    reads the parent's large-scale structure through it, so nothing restarts at the new scale:
+    buildings are the parent's lots (the same few buildings, now spanning several tiles), landforms
+    are the parent's ridges, and the parent's big patches (clearings, clumps, fields) tint the
+    ground under the layer's own close-up texture."""
+
+    x: float
+    y: float
+    factor: float  # layer pixels per parent pixel
+    k: float  # the parent's tile_px / 64
+    levels: float  # relief levels here per parent level (floors, landforms)
+    source: str = ""  # the parent material under this one ("" when the parent had none)
+    buildings: BuildingsSpec | None = None  # the parent's buildings (lots, floors, coverage)
+    elevation: int | None = None  # the parent's landform target
+    ops: list[PatternOp] = Field(default_factory=list)  # the parent's large-scale patterns
+
+
 class MaterialSpec(BaseModel):
     base_color: str = Field(description="'#rrggbb'. A 5-step ramp (outline/dark/base/light/hi) is derived.")
     accent_color: str = Field(description="'#rrggbb' for accent decals (flowers, embers, sparkles).")
@@ -257,6 +278,8 @@ class MaterialSpec(BaseModel):
         description="Connectors only: 'dashed' paints a road's dashed centre line and kerbs (streets, "
         "highways), 'rails' two rails with sleepers (railways, tram and cable-car lines), 'none' otherwise.",
     )
+    # engine-set in a drilled layer (never shown to agents): the parent tile this layer zooms into
+    lens: SkipJsonSchema[Lens | None] = None
     width: float = Field(
         default=1.0,
         description="Connectors only: width relative to the usual (the engine sets it for close-up "

@@ -12,6 +12,7 @@ import asyncio
 import math
 import re
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -20,6 +21,7 @@ from hexworld.art.grid import TileCanvas
 from hexworld.art.paint import pixelize_sprite, style_frame
 from hexworld.art.pixelize import crisp_tile
 from hexworld.art.procedural import lattice, render_ground_full, street_half
+from hexworld.art.relief import facade_codes, split_levels
 from hexworld.art.scene import (
     PAINT_SIZE,
     SCENE_H,
@@ -157,7 +159,8 @@ class Layers:
             raise ValueError(f"tile ({q},{r}) isn't built yet")
         assert parent.spec is not None and parent.style is not None
         depth = parent.depth + 1
-        guide, routes, marks = await asyncio.to_thread(self._guide, parent, tile, radius)
+        g = await asyncio.to_thread(self._guide, parent, tile, radius)
+        guide, routes, marks = g.terrain, g.routes, g.marks
         counts: dict[str, int] = {}
         for v in guide.values():
             counts[v] = counts.get(v, 0) + 1
@@ -177,6 +180,12 @@ class Layers:
                 "connector (given: don't add routes); the tiles either side are the blocks"
             )
         context["landmarks"] = marks
+        context["scale"] = g.scale
+        if g.props:
+            context["props"] = {
+                "note": "the parent tile's props, at the region tiles where they stood (tile -> kinds)",
+                "at": g.props,
+            }
         vocab = [
             t for t in dict.fromkeys([*counts, tile.biome or "", *[e.terrain for e in tile.edges or []]]) if t
         ]
@@ -193,7 +202,16 @@ class Layers:
             name=name,
             radius=radius,
             created_at=time.time(),
-            parent=ParentLink(world_id=world_id, q=q, r=r, context=context, guide=guide, routes=routes),
+            parent=ParentLink(
+                world_id=world_id,
+                q=q,
+                r=r,
+                context=context,
+                guide=guide,
+                routes=routes,
+                notes=g.notes,
+                props=g.props,
+            ),
             depth=depth,
             scale_note=SCALE_NOTES.get(depth, SCALE_NOTES[2]),
             spec=parent.spec.model_copy(
@@ -217,9 +235,7 @@ class Layers:
         )
         return child, await self._build(child, tile)
 
-    def _guide(
-        self, parent: World, tile: Tile, radius: int
-    ) -> tuple[dict[str, str], list[Route], list[dict[str, Any]]]:
+    def _guide(self, parent: World, tile: Tile, radius: int) -> Guide:
         """The parent tile's own map, zoomed up to the region: which terrain lies under each region tile
         (thin water, like rivers and shores, wins a tile once it covers half of it), the parent's
         streets and paths traced as connector routes through the tiles they cross (streets run on the
@@ -228,7 +244,7 @@ class Layers:
         P = parent.style.tile_px if parent.style else 64
         labels: list = []
         edges = [{"terrain": e.terrain, "connectors": list(e.connectors)} for e in tile.edges or []]
-        render_ground_full(
+        _, packed, _ = render_ground_full(
             tile_px=P,
             biome=tile.biome or "",
             edges=edges,
@@ -299,7 +315,14 @@ class Layers:
             if la.kind == "sprite" and la.label and la.role == "landmark":
                 x, y = la.x * (P / 2) / k, la.y * (P / 2) / k  # parent tile units -> region units
                 marks.append({"kind": la.label, **_nearest_hex(x, y, radius)})
-        return guide, routes, marks
+        notes, scale = _tile_notes(packed, guide, routes, (ox, oy), (cx, cy), k, radius, offs)
+        props: dict[str, list[str]] = {}
+        for la in tile.layers:
+            if la.kind == "sprite" and la.label and la.role != "landmark":
+                h = _nearest_hex(la.x * (P / 2) / k, la.y * (P / 2) / k, radius)
+                props.setdefault(f"{h['q']},{h['r']}", []).append(la.label)
+        scale["parent_props"] = sum(len(v) for v in props.values())
+        return Guide(terrain=guide, routes=routes, marks=marks, notes=notes, props=props, scale=scale)
 
     async def _build(self, child: World, tile: Tile) -> Run:
         prompt = (
@@ -619,6 +642,103 @@ def _round_hex(fq: float, fr: float) -> Hex:
     elif dr > ds:
         r = -q - s_
     return Hex(q, r)
+
+
+@dataclass
+class Guide:
+    """A region's parent tile, zoomed up (see Layers._guide)."""
+
+    terrain: dict[str, str]  # "q,r" -> terrain
+    routes: list[Route]  # traced streets and paths
+    marks: list[dict[str, Any]]  # the parent's landmarks, placed
+    notes: dict[str, str]  # "q,r" -> what this tile is within the parent (agents read it)
+    props: dict[str, list[str]]  # "q,r" -> the parent's props that stood there
+    scale: dict[str, Any]  # the zoom in numbers (agents read it)
+
+
+def _tile_notes(
+    packed: np.ndarray,
+    guide: dict[str, str],
+    routes: list[Route],
+    origin: tuple[float, float],
+    centre: tuple[float, float],
+    k: float,
+    radius: int,
+    offs: list[tuple[float, float]],
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """What each region tile is within the parent tile, in words for the agents: part of which of
+    the parent's buildings (they keep their size, so one spans several tiles here), a street or
+    path, or the open ground between; plus the zoom in numbers."""
+    (ox, oy), (cx, cy) = origin, centre
+    C = packed.shape[0]
+    levels, _ = split_levels(packed)
+    built = facade_codes(packed) > 0
+    comp = _components(built)
+    ground = float(np.median(levels[~built])) if (~built).any() else 0.0
+    under: dict[str, int] = {}
+    for key in guide:
+        q, r = map(int, key.split(","))
+        x, y = Hex(q, r).to_pixel(1.0)
+        ids: dict[int, int] = {}
+        for dx, dy in offs:
+            px = min(C - 1, max(0, int(cx + (x + dx) * k - ox)))
+            py = min(C - 1, max(0, int(cy + (y + dy) * k - oy)))
+            ids[int(comp[py, px])] = ids.get(int(comp[py, px]), 0) + 1
+        best, n = max(ids.items(), key=lambda kv: kv[1])
+        if best >= 0 and n >= 0.4 * len(offs):
+            under[key] = best
+    span: dict[int, int] = {}
+    for b in under.values():
+        span[b] = span.get(b, 0) + 1
+    order = {b: i + 1 for i, b in enumerate(sorted(span, key=lambda b: (-span[b], b)))}
+    floors = {b: max(1, round(float(levels[comp == b].max()) - ground)) for b in span}
+    on_route: dict[str, set[str]] = {}
+    for rt in routes:
+        for p in rt.points:
+            on_route.setdefault(f"{p.q},{p.r}", set()).add(rt.connector)
+    notes = {}
+    for key, terrain in guide.items():
+        if key in under:
+            b = under[key]
+            notes[key] = (
+                f"inside the footprint of the parent's building #{order[b]} (about {floors[b]} floors, "
+                f"it covers {span[b]} tiles here): its roof and walls fill this tile"
+            )
+        elif key in on_route:
+            notes[key] = (
+                f"the parent's {' and '.join(sorted(_pretty(c) for c in on_route[key]))} runs through"
+            )
+        else:
+            notes[key] = f"open {_pretty(terrain)} (a yard, pavement or gap around the parent's buildings)"
+    scale = {
+        "tiles_across_parent": 2 * radius + 1,
+        "one_tile": f"about 1/{2 * radius + 1} of the parent tile across",
+        "parent_buildings": len(span),
+        "tiles_per_parent_building": round(sum(span.values()) / len(span), 1) if span else 0,
+        "note": "the parent's buildings keep their true size: each spans several tiles here, and the "
+        "engine raises them from the parent's own map (never add buildings, blocks or streets)",
+    }
+    return notes, scale
+
+
+def _components(mask: np.ndarray) -> np.ndarray:
+    """4-connected component ids of a boolean mask (-1 outside it)."""
+    comp = np.full(mask.shape, -1, np.int32)
+    H, W = mask.shape
+    n = 0
+    for y0, x0 in zip(*np.nonzero(mask), strict=False):
+        if comp[y0, x0] >= 0:
+            continue
+        stack = [(y0, x0)]
+        comp[y0, x0] = n
+        while stack:
+            y, x = stack.pop()
+            for yy, xx in ((y + 1, x), (y - 1, x), (y, x + 1), (y, x - 1)):
+                if 0 <= yy < H and 0 <= xx < W and mask[yy, xx] and comp[yy, xx] < 0:
+                    comp[yy, xx] = n
+                    stack.append((yy, xx))
+        n += 1
+    return comp
 
 
 def street_chains(

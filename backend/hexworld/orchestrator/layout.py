@@ -102,6 +102,9 @@ def hex_line(a: Hex, b: Hex) -> list[Hex]:
     return out
 
 
+GUIDED_DENSITY = 0.3  # ambient features per tile up close (the parent's own props come on top)
+
+
 def guided_hints(routes: list[Route], radius: int, centre: Hex = ORIGIN) -> dict[Hex, dict[int, set[str]]]:
     """Edge connectors of a drilled region's tiles from the parent's traced streets (tile -> edge ->
     connectors). Both tiles sharing an edge get it; a street leaving the region leads out of its rim
@@ -172,6 +175,8 @@ def rasterize(
     fill_radius: bool = False,
     guide: dict[Hex, str] | None = None,
     guide_routes: list[Route] | None = None,
+    guide_notes: dict[Hex, str] | None = None,
+    guide_props: dict[Hex, list[str]] | None = None,
 ) -> Rasterized:
     res = Rasterized(tiles=[])
     owner: dict[Hex, int] = {}  # tile -> region index
@@ -322,8 +327,12 @@ def rasterize(
             pt = origin_tile.model_copy(update={"q": h.q, "r": h.r, "leave_empty": False})
             res.tiles.append(pt)
             continue
+        if guide:  # up close: the parent's own props where they stood, and a light scatter
+            reg = reg.model_copy(update={"feature_density": min(reg.feature_density, GUIDED_DENSITY)})
         feats = [f for f in lm.features if not is_building_kind(f)] if lm else _scatter(reg, h)
+        feats = [*(guide_props or {}).get(h, []), *feats][:3]
         biome = reg.biome if guide else (lm.biome if lm and lm.biome else None) or reg.biome
+        note = (guide_notes or {}).get(h)
         edge_hints = [
             EdgeHint(edge=i, terrain=biome, connectors=sorted(cs))
             for i, cs in sorted(hints.get(h, {}).items())
@@ -338,7 +347,8 @@ def rasterize(
                 r=h.r,
                 leave_empty=False,
                 biome=biome,
-                intent=(lm.intent if lm else reg.intent),
+                intent=(lm.intent if lm else reg.intent)
+                + (f" Up close, this tile is {note}." if note else ""),
                 features=feats,
                 edge_hints=edge_hints,
                 priority=5 if lm else reg.priority,

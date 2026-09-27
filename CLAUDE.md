@@ -52,9 +52,14 @@
   tile's terrain (`ParentLink.guide`, applied by `rasterize(guide=)` and `_apply_plan`), and its
   streets (all on the lattice) are traced into connector routes (`street_chains`), winding paths into
   tile links kept as a tree that leave through the parent's own edges (`path_links`), both ->
-  `ParentLink.routes` -> `guided_hints`; `normalize_design` makes those the only streets/paths. Up
-  close (`_with_ambient`), built materials get `street_grid` 0 and bigger lots; connectors keep the
-  parent's `edges` style, drawn wider (`width` 3.5 streets, 1.5 paths).
+  `ParentLink.routes` -> `guided_hints`; `normalize_design` makes those the only streets/paths.
+  Every material in a drilled layer carries an engine-only `Lens` (`MaterialSpec.lens`, hidden from
+  agent schemas via SkipJsonSchema, set in `RunExecutor._through_lens`): the renderer reads the
+  parent through it, so buildings are the parent's own lots at true size (`paint_buildings`),
+  landforms the parent's ridges (`elevation_field`), big patches the parent's (`_paint_lens`).
+  Agents get the zoom as metadata: `ParentLink.notes` (what each tile is within the parent: which
+  building, street, open ground), `props`, and `context.scale`; the reviewer and tile agents see it
+  as `up_close`. Connectors keep the parent's `edges` style, drawn wider (`width` 3.5/1.5).
 - Scheduling (`RunExecutor._grow/_job`): neighbouring *attempts* never overlap; a tile that passes the
   deterministic checks is provisionally settled (neighbours may start) while it is reviewed, and a
   rejected tile keeps the edges its neighbours were built against (`Job.locked`).

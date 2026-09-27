@@ -81,6 +81,12 @@ export interface ParentLink {
     [k: string]: string;
   };
   routes: Route[];
+  notes: {
+    [k: string]: string;
+  };
+  props: {
+    [k: string]: string[];
+  };
 }
 /**
  * This interface was referenced by `ApiSchemas`'s JSON-Schema

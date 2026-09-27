@@ -439,3 +439,44 @@ def test_elevation_rises_into_mountains_and_stays_continuous_across_edges():
                 d = np.abs(out[h][sa].astype(int) - out[n][sb].astype(int))[near]
                 worst = max(worst, float(d.mean()))
     assert worst < 2.0
+
+
+def test_a_lens_shows_the_parents_buildings_up_close():
+    """Through a drilled layer's lens a tile shows a slice of a few big parent buildings, not a
+    fresh block of small ones; the lens never reaches the agents' schema."""
+    from hexworld.art.procedural import render_ground_full
+    from hexworld.art.relief import facade_codes
+    from hexworld.domain.art import BuildingsSpec, Lens, MaterialSpec
+    from hexworld.game.layers import _components
+
+    P = 64
+    b = BuildingsSpec(
+        layout="blocks",
+        lot_px=18,
+        street_grid=1,
+        wall_colors=["#8a6a5a"],
+        roof_colors=["#444444"],
+        facade="punched",
+    )
+    city = _mat([]).model_copy(update={"buildings": b})
+    lens = Lens(x=0, y=0, factor=7, k=1, levels=3.5, source="city", buildings=b)
+
+    def buildings(spec: MaterialSpec) -> tuple[int, float]:
+        _, packed, _ = render_ground_full(
+            tile_px=P,
+            biome="city",
+            edges=[{"terrain": "city", "connectors": []}] * 6,
+            coord=(0, 1),
+            materials={"city": spec},
+        )
+        m = TileCanvas(Hex(0, 1), P).mask()
+        built = (facade_codes(packed) > 0) & m
+        comp = _components(built)
+        return len({int(c) for c in comp[built]}), float(built.sum()) / max(
+            1, len({int(c) for c in comp[built]})
+        )
+
+    n_own, size_own = buildings(city)
+    n_zoom, size_zoom = buildings(city.model_copy(update={"lens": lens}))
+    assert n_own >= 5 and n_zoom <= 3  # slices of a few big buildings, clipped by the tile
+    assert "lens" not in str(MaterialSpec.model_json_schema())

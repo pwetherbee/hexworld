@@ -802,6 +802,21 @@
             "$ref": "#/$defs/Route"
           },
           "type": "array"
+        },
+        "notes": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "props": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "type": "object"
         }
       },
       "required": [
@@ -810,7 +825,9 @@
         "r",
         "context",
         "guide",
-        "routes"
+        "routes",
+        "notes",
+        "props"
       ],
       "title": "ParentLink",
       "type": "object"

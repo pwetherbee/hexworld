@@ -104,8 +104,10 @@ class MaterialArtist:
         }
         if self.reference is not None:
             payload["on_the_map_above"] = {
-                "note": "this terrain as drawn on the map this layer zooms into: keep its colours, "
-                "character and (if built) its buildings, drawn at this closer scale",
+                "note": "this terrain as drawn on the map this layer zooms into: keep its colours and "
+                "character, drawn at this closer scale. If it is built, the engine lays out the parent's "
+                "own buildings at their true size (each now spans several tiles): your buildings spec "
+                "sets how they look (walls, roofs, facades, lights), not how many there are",
                 "spec": self.reference.model_dump(exclude_defaults=True),
             }
         self.renders = 0

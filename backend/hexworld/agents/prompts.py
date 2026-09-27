@@ -102,6 +102,11 @@ routes, and a city block's buildings fill the tiles around them. Stay inside thi
 map's coasts, parks and districts are beyond it. drill.parent_tile.landmarks says where the parent's
 landmarks stood: put a landmark there (the lighthouse is now a lighthouse compound). Prop scale follows
 the new scale: at street or room scale people and objects are big (prop_scale 1.0-1.3).
+drill.parent_tile.scale is the zoom in numbers: one tile here is a small slice of the parent tile, so
+each of the parent's few buildings now spans several tiles (the engine raises exactly those, at their
+true size, from the parent's map). Never plan more buildings, blocks or streets than the parent shows.
+drill.parent_tile.props lists the parent's own props and where they stood (the engine places them);
+give each region a light, varied cast on top (feature_density 0.1-0.3), not a crowd on every tile.
 
 Deliver the plan in TWO calls, in this order:
 1. submit_world(header): world, style, tile_attributes and origin_tile. The origin starts building
