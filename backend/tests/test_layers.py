@@ -57,3 +57,24 @@ def test_a_parents_streets_become_straight_chains_of_region_tiles():
     leg = next(c for c in chains if c is not row)
     assert all(a.distance(b) == 1 for a, b in zip(leg, leg[1:], strict=False))
     assert Hex(0, 0) in leg and min(h.r for h in leg) == -R - 1 and max(h.r for h in leg) <= 0
+
+
+def test_a_winding_path_becomes_a_tree_of_links_leaving_through_its_parent_edge():
+    import numpy as np
+
+    from hexworld.art.grid import TileCanvas
+    from hexworld.game.layers import path_links
+    from hexworld.hex import ORIGIN, SQRT3, Hex
+
+    P, R = 64, 3
+    canvas = TileCanvas(ORIGIN, P)
+    (cx, cy), (ox, oy) = canvas.center, canvas.origin
+    ys, xs = np.mgrid[0 : canvas.C, 0 : canvas.C] + 0.5
+    dx, dy = xs + ox - cx, ys + oy - cy
+    mask = (np.abs(dy) < 7) & (dx > -3)  # a wide trail from the centre out through the E edge
+    k = (P / 2) * SQRT3 / 2 / (SQRT3 * (R + 0.5))
+    links = path_links(mask, (ox, oy), (cx, cy), k, R, exits=[0])
+    assert (Hex(R, 0), Hex(R + 1, 0)) in links  # leaves through the E corner tile
+    inside = [(a, b) for a, b in links if b.distance(ORIGIN) <= R]
+    nodes = {h for pair in inside for h in pair}
+    assert len(inside) == len(nodes) - 1  # a tree: no ladder across the wide trail

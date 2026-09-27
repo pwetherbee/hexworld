@@ -45,6 +45,7 @@ from hexworld.domain import (
 )
 from hexworld.domain.art import SpriteEntry
 from hexworld.hex import DIRECTION_NAMES, ORIGIN, SQRT3, Hex, ring, within
+from hexworld.orchestrator.layout import hex_line
 from hexworld.telemetry import Tracer, new_id
 
 if TYPE_CHECKING:
@@ -220,10 +221,10 @@ class Layers:
         self, parent: World, tile: Tile, radius: int
     ) -> tuple[dict[str, str], list[Route], list[dict[str, Any]]]:
         """The parent tile's own map, zoomed up to the region: which terrain lies under each region tile
-        (thin things, like rivers and paths, win a tile once they cover half of it), the parent's
-        streets traced as connector routes through the tiles they cross (they all run on the world's
-        street lattice, so each is a straight run), and where the parent's landmarks stood. The
-        region is then the tile up close, not a reinvention."""
+        (thin water, like rivers and shores, wins a tile once it covers half of it), the parent's
+        streets and paths traced as connector routes through the tiles they cross (streets run on the
+        world's street lattice, so each is a straight run; paths wind from tile to tile), and where the
+        parent's landmarks stood. The region is then the tile up close, not a reinvention."""
         P = parent.style.tile_px if parent.style else 64
         labels: list = []
         edges = [{"terrain": e.terrain, "connectors": list(e.connectors)} for e in tile.edges or []]
@@ -246,6 +247,11 @@ class Layers:
             return n in conns and spec is not None and spec.edges == "straight" and not spec.liquid
 
         streets = {n: (street if n.startswith("__") else n) for n in names if straight(n)}
+        paths = {  # winding connectors (trails, lanes, coastal roads): traced tile to tile
+            n
+            for n in names
+            if n in conns and n not in streets and not getattr(parent.materials.get(n), "liquid", False)
+        }
         thin = {n for n in names if n in conns or getattr(parent.materials.get(n), "liquid", False)}
         canvas = TileCanvas(tile.hex, P)
         (cx, cy), (ox, oy) = canvas.center, canvas.origin
@@ -260,7 +266,7 @@ class Layers:
                 px = min(C - 1, max(0, int(cx + (x + dx) * k - ox)))
                 py = min(C - 1, max(0, int(cy + (y + dy) * k - oy)))
                 n = names[int(mat[py, px])]
-                if n not in streets:  # a street tile is the block it runs through
+                if n not in streets and n not in paths:  # a street tile is the land it runs through
                     counts[n] = counts.get(n, 0) + 1
             total = sum(counts.values())
             strong = [(c, n) for n, c in counts.items() if n in thin and c / total >= 0.5]
@@ -283,6 +289,11 @@ class Layers:
         for cname, mask in by_name.items():
             for chain in street_chains(mask, (ox, oy), (cx, cy), k, radius, P):
                 routes.append(Route(connector=cname, points=[Coord(q=h.q, r=h.r) for h in chain]))
+        for cname in sorted(paths):
+            mask = mat == names.index(cname)
+            exits = [i for i, e in enumerate(tile.edges or []) if cname in e.connectors]
+            for a, b in path_links(mask, (ox, oy), (cx, cy), k, radius, exits):
+                routes.append(Route(connector=cname, points=[Coord(q=a.q, r=a.r), Coord(q=b.q, r=b.r)]))
         marks = []
         for la in tile.layers:
             if la.kind == "sprite" and la.label and la.role == "landmark":
@@ -680,3 +691,74 @@ def _walk(fixed: float, t0: float, t1: float, radius: int, vertical: bool) -> li
         if h.distance(ORIGIN) <= radius + 1 and (not cells or cells[-1] != h):
             cells.append(h)
     return cells
+
+
+def path_links(
+    mask: np.ndarray,
+    origin: tuple[float, float],
+    centre: tuple[float, float],
+    k: float,
+    radius: int,
+    exits: list[int],
+) -> list[tuple[Hex, Hex]]:
+    """A winding path of a parent tile (`mask`: its pixels on the tile canvas at `origin`) as links
+    between region tiles: tiles the path mostly covers, joined where it runs from one centre to the
+    next, kept as a tree (a band two tiles wide must not become a ladder). Where the parent's path
+    leaves through its edge i (`exits`), the region's path leaves through the corner tile that way
+    (the parent's edge midpoint lands there), so it reaches the neighbouring region."""
+    (ox, oy), (cx, cy) = origin, centre
+    C = mask.shape[0]
+
+    def frac(pts: list[tuple[float, float]]) -> float:
+        on = 0
+        for x, y in pts:
+            px = min(C - 1, max(0, int(cx + x * k - ox)))
+            py = min(C - 1, max(0, int(cy + y * k - oy)))
+            on += bool(mask[py, px])
+        return on / len(pts)
+
+    def along(a: Hex, b: Hex) -> float:
+        (ax, ay), (bx, by) = a.to_pixel(1.0), b.to_pixel(1.0)
+        return frac([(ax + (bx - ax) * t, ay + (by - ay) * t) for t in np.linspace(0, 1, 9)])
+
+    offs = [(dx * 0.3, dy * 0.3) for dx in range(-2, 3) for dy in range(-2, 3) if dx * dx + dy * dy <= 5]
+    cells = set()
+    for h in within(ORIGIN, radius):
+        x, y = h.to_pixel(1.0)
+        if frac([(x + dx, y + dy) for dx, dy in offs]) >= 0.35:
+            cells.add(h)
+    corners = []
+    for i in exits:
+        c = ORIGIN
+        for _ in range(radius):
+            c = c.neighbor(i)
+        corners.append((c, c.neighbor(i)))
+        cells.add(c)
+    cand = sorted(
+        ((along(a, b), a, b) for a in cells for b in a.neighbors() if b in cells and (a.q, a.r) < (b.q, b.r)),
+        key=lambda x: -x[0],
+    )
+    root = {h: h for h in cells}
+
+    def find(h: Hex) -> Hex:
+        while root[h] != h:
+            root[h] = root[root[h]]
+            h = root[h]
+        return h
+
+    out: list[tuple[Hex, Hex]] = []
+    for f, a, b in cand:  # the strongest links first, never closing a loop
+        if f >= 0.6 and find(a) != find(b):
+            root[find(a)] = find(b)
+            out.append((a, b))
+    linked = {h for pair in out for h in pair}
+    for c, beyond in corners:
+        if c not in linked and linked:  # join the exit to the path by the shortest way
+            near = min(linked, key=lambda h: (h.distance(c), h.q, h.r))
+            line = hex_line(c, near)
+            out += [(p, q) for p, q in zip(line, line[1:], strict=False) if find(p) != find(q)]
+            for p, q in zip(line, line[1:], strict=False):
+                root[find(p)] = find(q)
+            linked |= set(line)
+        out.append((c, beyond))
+    return out

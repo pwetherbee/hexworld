@@ -563,7 +563,7 @@ class RunExecutor:
         async def make() -> MaterialSpec:
             async with self.tracer.span("library.material", parent, material=name) as sp:
                 try:
-                    up = self.store.get_world(w.parent.world_id) if w.parent else None
+                    up = self._parent_world()
                     mat_artist = artist.MaterialArtist(
                         self.kit,
                         world=w,
@@ -790,6 +790,14 @@ class RunExecutor:
             self.world.materials[terrain] = self._with_ambient(terrain, mat)
             self.store.put_world(self.world)
 
+    def _parent_world(self) -> World | None:
+        """The world this one is the inside of a tile of (drilled layers), cached."""
+        if self.world.parent is None:
+            return None
+        if getattr(self, "_up", None) is None:
+            self._up = self.store.get_world(self.world.parent.world_id)
+        return self._up
+
     def _with_ambient(self, terrain: str, spec: MaterialSpec) -> MaterialSpec:
         """A material as it enters the library (every path: design, revision, ambient extras)."""
         b = spec.buildings
@@ -800,8 +808,12 @@ class RunExecutor:
             if any(getattr(b, k) != v for k, v in fit.items()):
                 spec = spec.model_copy(update={"buildings": b.model_copy(update=fit)})
         conns = self.world.spec.connector_vocabulary if self.world.spec else []
-        if self.world.depth > 0 and terrain in conns and spec.edges == "straight" and not spec.liquid:
-            spec = spec.model_copy(update={"width": STREET_WIDTH_UP_CLOSE})  # the parent's avenue, zoomed
+        if self.world.depth > 0 and terrain in conns and not spec.liquid:  # the parent's road, zoomed
+            up = self._parent_world()
+            ref = up.materials.get(terrain) if up else None
+            edges = ref.edges if ref is not None else spec.edges  # traced as the parent draws it
+            wide = STREET_WIDTH_UP_CLOSE if edges == "straight" else PATH_WIDTH_UP_CLOSE
+            spec = spec.model_copy(update={"width": wide, "edges": edges})
         have = {s.kind for s in spec.scatter}
         extra = [e for e in self._ambient.get(terrain, []) if e.kind not in have]
         return spec.model_copy(update={"scatter": [*spec.scatter, *extra]}) if extra else spec
@@ -2461,6 +2473,7 @@ class RunExecutor:
 
 LOT_PX_UP_CLOSE = 28  # building footprint in a drilled layer (a tile is about one lot)
 STREET_WIDTH_UP_CLOSE = 3.5  # a street in a drilled layer, relative to the overworld's
+PATH_WIDTH_UP_CLOSE = 1.5  # a winding path or lane (the overworld draws them generously already)
 
 
 def _seed(*parts: Any) -> int:

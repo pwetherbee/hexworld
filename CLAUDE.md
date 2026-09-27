@@ -50,9 +50,11 @@
   backdrop + transparent foreground reduced to 384x256 and animated client-side (`ui/Play.tsx`).
 - A region is its parent tile up close (`Layers._guide`): the parent's own pixel map fixes each region
   tile's terrain (`ParentLink.guide`, applied by `rasterize(guide=)` and `_apply_plan`), and its
-  streets (all on the lattice) are traced into connector routes (`street_chains` -> `ParentLink.routes`
-  -> `guided_hints`); `normalize_design` makes those the only streets. Up close (`_with_ambient`),
-  built materials get `street_grid` 0 and bigger lots, street connectors `width` 3.5.
+  streets (all on the lattice) are traced into connector routes (`street_chains`), winding paths into
+  tile links kept as a tree that leave through the parent's own edges (`path_links`), both ->
+  `ParentLink.routes` -> `guided_hints`; `normalize_design` makes those the only streets/paths. Up
+  close (`_with_ambient`), built materials get `street_grid` 0 and bigger lots; connectors keep the
+  parent's `edges` style, drawn wider (`width` 3.5 streets, 1.5 paths).
 - Scheduling (`RunExecutor._grow/_job`): neighbouring *attempts* never overlap; a tile that passes the
   deterministic checks is provisionally settled (neighbours may start) while it is reviewed, and a
   rejected tile keeps the edges its neighbours were built against (`Job.locked`).
