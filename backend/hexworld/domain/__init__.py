@@ -521,6 +521,9 @@ class World(BaseModel):
     parent: ParentLink | None = None  # set for drilled layers
     depth: int = 0  # 0 = the overworld
     scale_note: str = ""  # what one tile is at this depth (for planners and artists)
+    region_radius: int = Field(
+        default=3, ge=2, le=6, description="Radius of the region grid inside each tile (set at creation)."
+    )
     spec: WorldSpec | None = None
     style: StyleGuide | None = None
     tile_attributes: list[AttributeDef] = Field(default_factory=list)
@@ -541,6 +544,12 @@ class RunOptions(BaseModel):
         default=None,
         description="Ground texture resolution per tile (32-128px). Only for a new world: all tiles of a "
         "world share one pixel grid, so extensions keep the world's resolution.",
+    )
+    region_radius: int | None = Field(
+        default=None,
+        ge=2,
+        le=6,
+        description="Only for a new world: radius of the region grid you find when entering a tile (then locked).",
     )
     fill_radius: bool = Field(
         default=False, description="Plan every tile within the world radius (drilled layers fill their hex)."

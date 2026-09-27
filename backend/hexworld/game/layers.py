@@ -40,7 +40,7 @@ from hexworld.telemetry import Tracer, new_id
 if TYPE_CHECKING:
     from hexworld.orchestrator.runtime import Runtime
 
-DEFAULT_RADIUS = 5
+DEFAULT_RADIUS = 3
 AVATAR = "traveller"
 SCALE_NOTES = {
     1: "one tile is about a tenth of the overworld tile it lies in: a street corner, a clearing, a "
@@ -110,10 +110,19 @@ class Layers:
             "depth": world.depth,
         }
 
+    def _root(self, world: World) -> World:
+        while world.parent is not None and (up := self.store.get_world(world.parent.world_id)) is not None:
+            world = up
+        return world
+
     async def enter(
-        self, world_id: str, q: int, r: int, radius: int = DEFAULT_RADIUS
+        self, world_id: str, q: int, r: int, radius: int | None = None
     ) -> tuple[World, Run | None]:
-        """The world inside tile (q, r) of `world_id`; created and built on the first entry."""
+        """The world inside tile (q, r) of `world_id`; created and built on the first entry. Its size
+        is the overworld's region radius (chosen when the world was created) unless given."""
+        if radius is None:
+            w = self.store.get_world(world_id)
+            radius = self._root(w).region_radius if w else DEFAULT_RADIUS
         return await self._single_flight(
             f"enter:{world_id}:{q},{r}", lambda: self._enter(world_id, q, r, radius)
         )
@@ -154,6 +163,7 @@ class Layers:
             ),
             style=parent.style.model_copy(deep=True),
             tile_attributes=list(parent.tile_attributes),
+            region_radius=parent.region_radius,
         )
         self.store.put_world(child)
         self.store.put_drill(world_id, q, r, child.id)
@@ -278,11 +288,7 @@ class Layers:
         world = self.store.get_world(world_id)
         if world is None:
             raise KeyError(world_id)
-        while world.parent is not None:  # layers share the overworld's traveller
-            up = self.store.get_world(world.parent.world_id)
-            if up is None:
-                break
-            world = up
+        world = self._root(world)  # layers share the overworld's traveller
         if AVATAR in world.sprites:
             return world.sprites[AVATAR]
         painter = self._painter()

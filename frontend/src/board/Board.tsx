@@ -4,6 +4,7 @@ import * as THREE from "three";
 import { useStore } from "../store";
 import { usePlay } from "../play";
 import { CameraDirector } from "./CameraDirector";
+import { ContextRing } from "./ContextRing";
 import { PlayLayer } from "./PlayLayer";
 import { CameraRig, rig } from "./cameraRig";
 import { hexToWorld, parseKey } from "./hexMath";
@@ -30,6 +31,7 @@ export function Board() {
       <SeedBeacon />
       {world && (
         <>
+          <ContextRing />
           <Tiles />
           {playing ? <PlayLayer /> : <CameraDirector />}
         </>

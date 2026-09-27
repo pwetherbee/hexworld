@@ -44,7 +44,7 @@ class WorldDetail(BaseModel):
 
 
 class EnterTile(BaseModel):
-    radius: int = Field(default=5, ge=2, le=7)
+    radius: int | None = Field(default=None, ge=2, le=6)  # None: the world's region radius
 
 
 class EnterResult(BaseModel):

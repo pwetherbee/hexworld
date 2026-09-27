@@ -17,6 +17,7 @@ export function PromptModal() {
   const [prompt, setPrompt] = useState("");
   const [maxTiles, setMaxTiles] = useState(40);
   const [resIdx, setResIdx] = useState(2); // index into RESOLUTIONS
+  const [regionR, setRegionR] = useState(3); // radius of the region grid inside each tile
 
   const [maxAttempts, setMaxAttempts] = useState(3);
   const [maxCost, setMaxCost] = useState(2);
@@ -26,6 +27,7 @@ export function PromptModal() {
   const extending = !!world?.spec;
   const worldPx = world?.style?.tile_px;
   const tilePx = extending && worldPx ? worldPx : RESOLUTIONS[resIdx];
+  const regionRadius = extending ? (world?.region_radius ?? 3) : regionR;
 
   // Keep content mounted while the exit animation plays.
   useEffect(() => {
@@ -46,7 +48,7 @@ export function PromptModal() {
     setBusy(true);
     setErr(null);
     try {
-      await useStore.getState().startRun(prompt, { max_tiles: maxTiles, tile_px: tilePx, max_attempts: maxAttempts, max_cost_usd: maxCost });
+      await useStore.getState().startRun(prompt, { max_tiles: maxTiles, tile_px: tilePx, region_radius: regionRadius, max_attempts: maxAttempts, max_cost_usd: maxCost });
       setPrompt("");
     } catch (e) {
       setErr((e as Error).message);
@@ -102,6 +104,14 @@ export function PromptModal() {
                 value={extending && worldPx ? RESOLUTIONS.indexOf(worldPx) : resIdx}
                 disabled={extending}
                 onChange={(e) => setResIdx(+e.target.value)}
+              />
+            </label>
+            <label title={extending ? "Set when the world was created: every region of a world has the same size" : "The grid you find inside each tile when you enter it"}>
+              Region size <b>r{regionRadius} · {3 * regionRadius * (regionRadius + 1) + 1} tiles</b>
+              <input
+                type="range" min={2} max={6} step={1} value={regionRadius}
+                disabled={extending}
+                onChange={(e) => setRegionR(+e.target.value)}
               />
             </label>
             <label>

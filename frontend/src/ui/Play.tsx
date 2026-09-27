@@ -57,6 +57,7 @@ export function PlayHud() {
   const scene = usePlay((s) => s.scene);
   const tile = useStore((s) => (here ? s.tiles[hexKey(here.q, here.r)] : undefined));
   const depth = useStore((s) => s.world?.depth ?? 0);
+  const hoverRegion = usePlay((s) => s.hoverRegion);
   const drilled = useStore((s) => (here ? !!s.drills[hexKey(here.q, here.r)] : false));
   const forming = useStore((s) => {
     const run = s.activeRunId ? s.runs[s.activeRunId] : undefined;
@@ -88,7 +89,9 @@ export function PlayHud() {
         )}
       </div>
       <div className="play-hint">
-        {forming && depth > 0
+        {hoverRegion
+          ? `Click to travel to ${pretty(hoverRegion.biome) || "that region"} (it opens around you)`
+          : forming && depth > 0
           ? `This place is still taking shape around you (${forming}): walk on the finished tiles.`
           : "Click a tile to walk there · W E / A D / Z X to hop · Enter · Esc"}
       </div>

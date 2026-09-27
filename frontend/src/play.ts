@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { api } from "./api/client";
 import type { Scene, SpriteEntry } from "./api/types.gen";
-import { DIRECTIONS, hexKey, parseKey } from "./board/hexMath";
+import { DIRECTIONS, hexKey, hexToWorld, parseKey } from "./board/hexMath";
 import { sfx } from "./sfx";
 import { localStorageGet, localStorageSet, useStore } from "./store";
 
@@ -11,8 +11,6 @@ import { localStorageGet, localStorageSet, useStore } from "./store";
 export type Pos = { worldId: string; q: number; r: number };
 
 export const HOP_MS = 230;
-/** radius of a tile's region grid (entering an overworld tile) */
-export const REGION_RADIUS = 5;
 /** deepest layer you can enter; below it tiles are looked at (scenes) */
 export const MAX_ENTER_DEPTH = 0;
 
@@ -31,12 +29,16 @@ interface PlayState {
   busy: null | "entering" | "leaving";
   avatar: SpriteEntry | null;
   scene: SceneView | null;
+  /** a surrounding parent tile under the pointer (inside a region): where a click travels */
+  hoverRegion: { q: number; r: number; biome: string } | null;
 
   start: () => Promise<void>;
   stop: () => Promise<void>;
   click: (key: string) => void;
   step: (dir: number) => void;
   enter: () => Promise<void>;
+  /** from inside a region, go to the region of another tile of the parent world */
+  travel: (q: number, r: number) => Promise<void>;
   back: () => Promise<void>;
   look: () => Promise<void>;
   closeScene: () => void;
@@ -129,6 +131,7 @@ export const usePlay = create<PlayState>((set, get) => {
     busy: null,
     avatar: null,
     scene: null,
+    hoverRegion: null,
 
     start: async () => {
       const b = useStore.getState();
@@ -204,7 +207,7 @@ export const usePlay = create<PlayState>((set, get) => {
       set({ busy: "entering", queue: [] });
       sfx.play("confirm");
       try {
-        const res = await api.enterTile(world.id, cur.q, cur.r, REGION_RADIUS);
+        const res = await api.enterTile(world.id, cur.q, cur.r); // the world's region radius
         const stack = [...get().stack, { worldId: res.world.id, q: 0, r: 0 }];
         set({ stack, from: null });
         persist({ rootId: s.rootId, stack });
@@ -212,6 +215,45 @@ export const usePlay = create<PlayState>((set, get) => {
         schedulePrefetch();
       } catch (e) {
         useStore.getState().setError(`Couldn't enter: ${(e as Error).message}`);
+      } finally {
+        set({ busy: null });
+      }
+    },
+
+    travel: async (q, r) => {
+      const s = get();
+      const world = useStore.getState().world;
+      const parent = world?.parent;
+      if (!s.active || s.busy || !world || !parent || (q === parent.q && r === parent.r)) return;
+      set({ busy: "entering", queue: [], hoverRegion: null });
+      sfx.play("confirm");
+      try {
+        const res = await api.enterTile(parent.world_id, q, r);
+        // arrive on the side you came from (if that region already exists; a new one starts at its centre)
+        let arrive = { q: 0, r: 0 };
+        if (!res.run) {
+          const [ox, oz] = hexToWorld(parent.q - q, parent.r - r);
+          let best = 0;
+          let bestDot = -Infinity;
+          DIRECTIONS.forEach(([dq, dr], i) => {
+            const [dx, dz] = hexToWorld(dq, dr);
+            const dot = dx * ox + dz * oz;
+            if (dot > bestDot) [best, bestDot] = [i, dot];
+          });
+          const R = res.world.radius;
+          arrive = { q: DIRECTIONS[best][0] * R, r: DIRECTIONS[best][1] * R };
+        }
+        const stack = [
+          ...s.stack.slice(0, -2),
+          { worldId: parent.world_id, q, r },
+          { worldId: res.world.id, ...arrive },
+        ];
+        set({ stack, from: null });
+        persist({ rootId: s.rootId, stack });
+        await useStore.getState().openWorld(res.world.id, { remember: false });
+        schedulePrefetch();
+      } catch (e) {
+        useStore.getState().setError(`Couldn't travel there: ${(e as Error).message}`);
       } finally {
         set({ busy: null });
       }

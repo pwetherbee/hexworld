@@ -1057,6 +1057,20 @@
           "default": null,
           "description": "Ground texture resolution per tile (32-128px). Only for a new world: all tiles of a world share one pixel grid, so extensions keep the world's resolution."
         },
+        "region_radius": {
+          "anyOf": [
+            {
+              "maximum": 6,
+              "minimum": 2,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Only for a new world: radius of the region grid you find when entering a tile (then locked)."
+        },
         "fill_radius": {
           "default": false,
           "description": "Plan every tile within the world radius (drilled layers fill their hex).",
@@ -1096,6 +1110,7 @@
         "max_tiles",
         "radius",
         "tile_px",
+        "region_radius",
         "fill_radius",
         "max_attempts",
         "review_batch",
@@ -2049,6 +2064,13 @@
           "default": "",
           "type": "string"
         },
+        "region_radius": {
+          "default": 3,
+          "description": "Radius of the region grid inside each tile (set at creation).",
+          "maximum": 6,
+          "minimum": 2,
+          "type": "integer"
+        },
         "spec": {
           "anyOf": [
             {
@@ -2104,6 +2126,7 @@
         "parent",
         "depth",
         "scale_note",
+        "region_radius",
         "spec",
         "style",
         "tile_attributes",

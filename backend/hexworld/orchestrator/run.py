@@ -386,6 +386,8 @@ class RunExecutor:
             # engine resolution, chosen by the user for a new world (then locked: one pixel grid)
             px = self.run.options.tile_px or 64
             w.style = w.style.model_copy(update={"tile_px": min(TILE_PX_CHOICES, key=lambda s: abs(s - px))})
+            if self.run.options.region_radius and w.depth == 0:
+                w.region_radius = self.run.options.region_radius
             w.name = plan.world.title or w.name
         else:
             # Extension of an existing world: style + attributes are locked; vocabularies may grow.

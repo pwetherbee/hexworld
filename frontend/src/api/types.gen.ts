@@ -48,6 +48,10 @@ export interface World {
   parent: ParentLink | null;
   depth: number;
   scale_note: string;
+  /**
+   * Radius of the region grid inside each tile (set at creation).
+   */
+  region_radius: number;
   spec: WorldSpec | null;
   style: StyleGuide | null;
   tile_attributes: AttributeDef[];
@@ -654,6 +658,10 @@ export interface RunOptions {
    * Ground texture resolution per tile (32-128px). Only for a new world: all tiles of a world share one pixel grid, so extensions keep the world's resolution.
    */
   tile_px: number | null;
+  /**
+   * Only for a new world: radius of the region grid you find when entering a tile (then locked).
+   */
+  region_radius: number | null;
   /**
    * Plan every tile within the world radius (drilled layers fill their hex).
    */
