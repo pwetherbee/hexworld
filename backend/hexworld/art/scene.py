@@ -52,6 +52,7 @@ def scene_fx(words: list[str]) -> list[str]:
 def _view_text(place: dict[str, Any]) -> str:
     """The place and what the viewer sees from it, looking north."""
     parts = [f"You stand on {place.get('here', 'this place')}."]
+    parts += place.get("land", [])
     if place.get("buildings"):
         parts.append(place["buildings"])
     view = place.get("view", {})
@@ -74,14 +75,26 @@ def backdrop_prompt(style: Any, place: dict[str, Any], with_map: bool = False) -
         "The image you are given is a top-down MAP of this spot and its surroundings (north is up; you "
         "stand in the hexagon marked YOU, looking north). Follow it for what lies where: coastlines, "
         "water, roads and paths, woods, buildings, landmarks, and the colours of the land. Do NOT paint "
-        "a map: paint what you would see standing there. "
+        "a map: paint what you would see standing there. The map is shaded for relief (the drop "
+        "shadows are slopes and walls). "
         if with_map
+        else ""
+    )
+    land = (
+        "Paint THIS landform exactly as described (a valley stays a valley with the land rising on "
+        "its sides, level ground stays level, a hilltop looks out over lower land): it is measured "
+        "from the world, not a mood. "
+        if place.get("land")
         else ""
     )
     return (
         "A wide, side-view 16-bit pixel art scene: the location screen of a top-down RPG, in the "
-        "tradition of Octopath Traveler, Terraria and SNES backgrounds. " + ref + _view_text(place) + " "
-        "Composition: the ground where you stand fills the lower third, what lies ahead rises in the middle "
+        "tradition of Octopath Traveler, Terraria and SNES backgrounds. "
+        + ref
+        + _view_text(place)
+        + " "
+        + land
+        + "Composition: the ground where you stand fills the lower third, what lies ahead rises in the middle "
         "distance, the far land on the horizon, and sky above "
         f"({place.get('sky', 'a clear day')}). Depth by colour: farther is paler and bluer. "
         f"World palette: {palette}. {keywords}. Chunky, clearly visible pixels, crisp edges, bold readable "

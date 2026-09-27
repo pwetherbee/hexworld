@@ -822,6 +822,9 @@ export interface Attempt {
  */
 export interface TileDesign {
   biome: string;
+  /**
+   * One sentence: this place as a traveller standing in it would see it (what rises, lies and lives here), never map talk (tiles, footprints, edges, seams).
+   */
   summary: string;
   attributes: {
     [k: string]: unknown;

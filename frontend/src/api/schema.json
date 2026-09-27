@@ -1919,6 +1919,7 @@
           "type": "string"
         },
         "summary": {
+          "description": "One sentence: this place as a traveller standing in it would see it (what rises, lies and lives here), never map talk (tiles, footprints, edges, seams).",
           "type": "string"
         },
         "attributes": {

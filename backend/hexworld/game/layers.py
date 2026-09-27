@@ -21,7 +21,7 @@ from hexworld.art.grid import TileCanvas
 from hexworld.art.paint import pixelize_sprite, style_frame
 from hexworld.art.pixelize import crisp_tile
 from hexworld.art.procedural import lattice, render_ground_full, street_half
-from hexworld.art.relief import facade_codes, split_levels
+from hexworld.art.relief import facade_codes, load_heightmap, relief_shade, split_levels
 from hexworld.art.scene import (
     PAINT_SIZE,
     SCENE_H,
@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from hexworld.orchestrator.runtime import Runtime
 
 DEFAULT_RADIUS = 3
-SCENE_VERSION = 2  # 2: painted from a map of the surroundings and a described view
+SCENE_VERSION = 3  # 2: painted from a map of the surroundings; 3: + the measured landform
 AVATAR = "traveller"
 SCALE_NOTES = {
     1: "one tile is about a tenth of the overworld tile it lies in: a street corner, a clearing, a "
@@ -389,15 +389,17 @@ class Layers:
 
     # ------------------------------------------------------------------ looking at a tile
 
-    def _describe(self, world: World, t: Tile, own_elev: float) -> str:
-        """One neighbour as the viewer sees it: what it is, its landmarks, and whether it rises."""
+    def _describe(self, world: World, t: Tile, own_elev: float, measured: bool = False) -> str:
+        """One neighbour as the viewer sees it: what it is, its landmarks, and whether it rises
+        (measured from the heightmaps when both have one, else from the materials)."""
         text = _pretty(t.biome) + (f" ({t.summary.rstrip('.')})" if t.summary else "")
         marks = [la.label for la in t.layers if la.kind == "sprite" and la.role == "landmark" and la.label]
         if marks:
             text += f", with {', '.join(marks[:2])}"
         m = world.materials.get(t.biome or "")
+        g = self._ground_level(world, t) if measured else None
         if m is not None:
-            d = (m.elevation + m.height) - own_elev
+            d = (g[0] if g else m.elevation + m.height) - own_elev
             if m.liquid:
                 text += ", open water"
             elif d >= 8:
@@ -417,6 +419,9 @@ class Layers:
         tiles = {t.hex: t for t in self.store.list_tiles(world.id) if t.status == TileStatus.accepted}
         own = world.materials.get(tile.biome or "")
         own_elev = (own.elevation + own.height) if own else 1
+        g_own = self._ground_level(world, tile)
+        if g_own is not None:
+            own_elev = g_own[0]
         h = tile.hex
         # hex directions: E=0, NE=1, NW=2, W=3, SW=4, SE=5; north is up, between NW and NE
         view: dict[str, list[str]] = {"ahead": [], "left": [], "right": [], "beyond": [], "horizon": []}
@@ -424,11 +429,11 @@ class Layers:
             for i in dirs:
                 n = tiles.get(h.neighbor(i))
                 if n is not None and n.biome:
-                    view[key].append(self._describe(world, n, own_elev))
+                    view[key].append(self._describe(world, n, own_elev, g_own is not None))
         for dq, dr in ((0, -2), (1, -2), (2, -2)):
             n = tiles.get(Hex(h.q + dq, h.r + dr))
             if n is not None and n.biome:
-                view["beyond"].append(self._describe(world, n, own_elev))
+                view["beyond"].append(self._describe(world, n, own_elev, g_own is not None))
         if world.parent is not None:  # the overworld around the region, toward the north
             ctx = world.parent.context
             ptiles = {t.hex: t for t in self.store.list_tiles(world.parent.world_id)}
@@ -442,22 +447,33 @@ class Layers:
             for dq, dr in ((0, -3), (1, -3), (2, -3), (-1, -2)):
                 n = tiles.get(Hex(h.q + dq, h.r + dr))
                 if n is not None and n.biome:
-                    view["horizon"].append(self._describe(world, n, own_elev))
+                    view["horizon"].append(self._describe(world, n, own_elev, g_own is not None))
             region = world.spec.title if world.spec else ""
         sprites = [la.label for la in tile.layers if la.kind == "sprite" and la.label]
+        land = self._landform(world, tiles, tile)
         here = _pretty(tile.biome) + (f": {tile.summary.rstrip('.')}" if tile.summary else "")
         if sprites:
             here += f" (with {', '.join(sprites[:4])})"
         buildings = ""
         if own is not None and own.buildings is not None:
             bb = own.buildings
+            src = own.lens.buildings if own.lens is not None and own.lens.buildings is not None else bb
             buildings = (
-                f"Around you: {bb.layout} of {bb.floors_min}-{bb.floors_max} floors, {bb.facade} facades, "
+                f"Around you: {src.layout} of {src.floors_min}-{src.floors_max} floors, {bb.facade} facades, "
                 f"{bb.roof} roofs."
             )
+        note = world.parent.notes.get(tile.hex.key, "") if world.parent is not None else ""
+        if "building #" in note:  # a spot inside one of the big buildings: stand at its foot
+            buildings += (
+                " One big building fills this spot: its facade rises right in front of you, close up "
+                "(doors, windows, signs, lights), with the pavement at its foot."
+            )
+        if world.parent is not None and world.parent.notes.get(tile.hex.key):
+            land.append(f"Within the larger place, this spot is {world.parent.notes[tile.hex.key]}.")
         return {
             "biome": tile.biome or "",
             "here": here,
+            "land": land,
             "buildings": buildings,
             "view": view,
             "region": region,
@@ -466,8 +482,116 @@ class Layers:
             "sky": "a clear day",
         }
 
+    def _relief(self, t: Tile) -> np.ndarray | None:
+        """A tile's packed heightmap (levels, liquid, facade codes), if it has one."""
+        la = next((la for la in t.layers if la.kind == "height"), None)
+        png = self.store.get_asset(la.asset_id) if la else None
+        return load_heightmap(png) if png else None
+
+    def _ground_level(self, world: World, t: Tile) -> tuple[float, float, float] | None:
+        """(median ground level, relief spread across the tile, water share) from its heightmap;
+        buildings don't count as ground."""
+        packed = self._relief(t)
+        if packed is None:
+            return None
+        P = world.style.tile_px if world.style else 64
+        m = TileCanvas(t.hex, P).mask()
+        if m.shape != packed.shape:
+            return None
+        lv, wet = split_levels(packed)
+        land = m & ~wet & (facade_codes(packed) == 0)
+        vals = lv[land] if land.any() else lv[m]
+        lo, hi = np.percentile(vals, [10, 90])
+        return float(np.median(vals)), float(hi - lo), float(wet[m].mean())
+
+    def _landform(self, world: World, tiles: dict[Hex, Tile], tile: Tile) -> list[str]:
+        """The shape of the land around the viewer, measured from the heightmaps (one relief level
+        is about 1/18 of a tile's width): valley, basin, hilltop, ridge or slope, what rises or falls
+        ahead, left and right, and what crosses this spot. Painted as a fact, not a mood."""
+        own = self._ground_level(world, tile)
+        if own is None:
+            return []
+        level, spread, water = own
+        h = tile.hex
+        # looking north: ahead = NW, NE and the tiles beyond; left = W (and SW); right = E (and SE)
+        sides = {
+            "ahead": [h.neighbor(2), h.neighbor(1)],
+            "left": [h.neighbor(3)],
+            "right": [h.neighbor(0)],
+            "behind": [h.neighbor(4), h.neighbor(5)],
+        }
+        rise: dict[str, float] = {}  # the adjacent land on each side, relative to this spot
+        for side, hexes in sides.items():
+            vals = [
+                g[0] for n in hexes if (t := tiles.get(n)) is not None and (g := self._ground_level(world, t))
+            ]
+            if vals:
+                rise[side] = float(np.mean(vals)) - level
+
+        def amount(d: float) -> str:
+            d = abs(d)
+            return "gently" if d < 4 else "steeply" if d < 12 else "into high walls of rock or hillside"
+
+        out: list[str] = []
+        up = {s: d for s, d in rise.items() if d >= 2.5}
+        down = {s: d for s, d in rise.items() if d <= -2.5}
+        if "left" in up and "right" in up:
+            shape = (
+                "a valley floor: the ground rises " + amount(min(up["left"], up["right"])) + " on both sides"
+            )
+            shape += (
+                ", and the valley runs on ahead"
+                if rise.get("ahead", 0) < 2.5
+                else ", closing in ahead as well (a bowl)"
+            )
+            out.append(f"The landform: {shape}.")
+        elif len(up) >= 3:
+            out.append("The landform: a basin, the land rising on every side around you.")
+        elif rise and not up and len(down) >= 2:
+            out.append(
+                "The landform: high ground, a hilltop or ridge, the land falling away "
+                + amount(min(down.values()))
+                + " around you."
+            )
+        else:
+            for side, word in (("ahead", "ahead"), ("left", "to the left"), ("right", "to the right")):
+                if side in up:
+                    out.append(f"The ground rises {amount(up[side])} {word} ({round(up[side])} levels).")
+                elif side in down:
+                    out.append(f"The ground falls away {amount(down[side])} {word}.")
+            if not out:
+                out.append("The landform: level ground, no hills close by.")
+        if spread >= 6:
+            out.append(
+                f"The ground where you stand is uneven, rising and falling about {round(spread)} levels."
+            )
+        if water >= 0.5:
+            out.append("Most of this spot is water.")
+        elif water >= 0.12:
+            out.append("Water covers part of this spot.")
+        # what crosses this spot, and from where (edge i: 0 E=right, 1 NE, 2 NW = ahead, 3 W=left, 4 SW, 5 SE = behind)
+        where = {
+            0: "the right",
+            1: "ahead right",
+            2: "ahead left",
+            3: "the left",
+            4: "behind left",
+            5: "behind right",
+        }
+        crossing: dict[str, list[str]] = {}
+        for i, e in enumerate(tile.edges or []):
+            for c in e.connectors:
+                crossing.setdefault(c, []).append(where[i])
+        for c, ends in crossing.items():
+            if len(ends) == 1:
+                out.append(f"A {_pretty(c)} comes in from {ends[0]} and ends here.")
+            else:
+                out.append(f"A {_pretty(c)} runs through, toward {', '.join(ends)}.")
+        return out
+
     def _map_png(self, world: World, tile: Tile) -> bytes | None:
-        """A top-down map of the spot and two rings around it, the viewer's hex marked YOU."""
+        """A top-down map of the spot and two rings around it, the viewer's hex marked YOU, with the
+        relief shaded in (hills and valleys read from it)."""
         import io
 
         from hexworld.art.composite import render_region
@@ -479,7 +603,11 @@ class Layers:
             if t.status == TileStatus.accepted and t.asset_id and t.hex.distance(tile.hex) <= 2:
                 png = self.store.get_asset(t.asset_id)
                 if png:
-                    arrays[t.hex] = load_tile(png)
+                    rgba = load_tile(png)
+                    packed = self._relief(t)
+                    if packed is not None and packed.shape == rgba.shape[:2]:
+                        rgba = relief_shade(rgba, packed, level_px=max(1, round(2 * P / 64)))
+                    arrays[t.hex] = rgba
         if not arrays:
             return None
         img = render_region(
@@ -701,15 +829,16 @@ def _tile_notes(
         if key in under:
             b = under[key]
             notes[key] = (
-                f"inside the footprint of the parent's building #{order[b]} (about {floors[b]} floors, "
-                f"it covers {span[b]} tiles here): its roof and walls fill this tile"
+                f"part of the parent's building #{order[b]}, a {floors[b]}-floor building spanning "
+                f"{span[b]} tiles here: this spot is that building up close (its walls, doors, "
+                "shopfronts, signs, what happens at its foot)"
             )
         elif key in on_route:
             notes[key] = (
                 f"the parent's {' and '.join(sorted(_pretty(c) for c in on_route[key]))} runs through"
             )
         else:
-            notes[key] = f"open {_pretty(terrain)} (a yard, pavement or gap around the parent's buildings)"
+            notes[key] = f"open {_pretty(terrain)}: a yard, pavement or lane between the parent's buildings"
     scale = {
         "tiles_across_parent": 2 * radius + 1,
         "one_tile": f"about 1/{2 * radius + 1} of the parent tile across",

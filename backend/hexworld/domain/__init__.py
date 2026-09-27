@@ -381,7 +381,10 @@ class PropSpec(BaseModel):
 
 class TileDesign(BaseModel):
     biome: str
-    summary: str
+    summary: str = Field(
+        description="One sentence: this place as a traveller standing in it would see it (what rises, "
+        "lies and lives here), never map talk (tiles, footprints, edges, seams)."
+    )
     attributes: dict[str, Any]
     edges: list[EdgeSpec]
     art_prompt: str
