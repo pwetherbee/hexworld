@@ -520,6 +520,7 @@ class SkirtTile(BaseModel):
     ring: int  # 1 = right outside the rim
     biome: str
     asset_id: str
+    height_id: str | None = None  # its relief (heightmap PNG, as a tile's height layer)
 
 
 class Scene(BaseModel):

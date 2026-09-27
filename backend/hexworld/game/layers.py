@@ -21,7 +21,7 @@ from hexworld.art.grid import TileCanvas
 from hexworld.art.paint import pixelize_sprite, style_frame
 from hexworld.art.pixelize import crisp_tile
 from hexworld.art.procedural import lattice, render_ground_full, street_half
-from hexworld.art.relief import facade_codes, load_heightmap, relief_shade, split_levels
+from hexworld.art.relief import facade_codes, levels_to_png, load_heightmap, relief_shade, split_levels
 from hexworld.art.scene import (
     PAINT_SIZE,
     SCENE_H,
@@ -375,8 +375,11 @@ class Layers:
                         edges.append({"terrain": e.terrain, "connectors": list(e.connectors)})
                     else:
                         edges.append({"terrain": src.biome, "connectors": []})
-                rgb, _, _ = render_ground_full(
+                rgb, packed, _ = render_ground_full(
                     tile_px=P, biome=src.biome, edges=edges, coord=(h.q, h.r), materials=mats
+                )
+                height = self.store.put_asset(
+                    levels_to_png(packed), {"kind": "skirt_height", "world": world.id, "q": h.q, "r": h.r}
                 )
                 buf = io.BytesIO()
                 Image.fromarray(rgb, "RGB").save(buf, format="PNG")
@@ -384,7 +387,7 @@ class Layers:
                 asset = self.store.put_asset(
                     pix.png, {"kind": "skirt", "world": world.id, "q": h.q, "r": h.r}
                 )
-                out.append(SkirtTile(q=h.q, r=h.r, ring=k, biome=src.biome, asset_id=asset))
+                out.append(SkirtTile(q=h.q, r=h.r, ring=k, biome=src.biome, asset_id=asset, height_id=height))
         return out
 
     # ------------------------------------------------------------------ looking at a tile

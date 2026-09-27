@@ -6,7 +6,7 @@ import { usePlay } from "../play";
 import { useStore } from "../store";
 import { tileFaceGeometry } from "./geometry";
 import { hexDistance, hexToWorld } from "./hexMath";
-import { SURFACE_TIME } from "./relief";
+import { SURFACE_TIME, reliefGeometry, useLevels, zoomLevels } from "./relief";
 import { usePixelTexture } from "./textures";
 import { TILE_HEIGHT } from "./TileMesh";
 
@@ -75,11 +75,23 @@ function ContextTile({ tile, pq, pr, S, P, R }: { tile: Tile; pq: number; pr: nu
     return t;
   }, [base]);
   useEffect(() => () => tex?.dispose(), [tex]);
-  const geo = useMemo(() => tileFaceGeometry(tile.q, tile.r, P), [tile.q, tile.r, P]);
+  const flat = useMemo(() => tileFaceGeometry(tile.q, tile.r, P), [tile.q, tile.r, P]);
   const self = tile.q === pq && tile.r === pr;
+  // the neighbours keep their relief, zoomed like the region (the entered tile lies under it, flat)
+  const heightLayer = self ? undefined : tile.layers?.find((l) => l.kind === "height");
+  const levels = useLevels(heightLayer?.asset_id);
+  const factor = 2 * R + 1; // the region's zoom: the parent tile's apothem spans R + 1/2 tiles
+  const relief = useMemo(
+    () =>
+      levels && heightLayer && levels.C === P + 3
+        ? reliefGeometry(tile.q, tile.r, `${heightLayer.asset_id}#zoom${factor}`, zoomLevels(levels, factor))
+        : null,
+    [levels, heightLayer, P, tile.q, tile.r, factor],
+  );
+  const geo = relief ?? flat;
   const [x, z] = hexToWorld(tile.q - pq, tile.r - pr);
   const hovered = usePlay((s) => s.hoverRegion?.q === tile.q && s.hoverRegion?.r === tile.r);
-  const mat = useMemo(() => makeFogMaterial(R, S, P), [R, S, P]);
+  const mat = useMemo(() => makeFogMaterial(R, S, P, !!relief), [R, S, P, relief]);
   useEffect(() => {
     mat.map = tex;
     mat.needsUpdate = true;
@@ -93,7 +105,7 @@ function ContextTile({ tile, pq, pr, S, P, R }: { tile: Tile; pq: number; pr: nu
     <mesh
       geometry={geo}
       material={mat}
-      position={[x * S, TILE_HEIGHT - (self ? 0.002 : 0.004), z * S]}
+      position={[x * S, relief ? 0 : TILE_HEIGHT - (self ? 0.002 : 0.004), z * S]}
       scale={[S * 1.012, 1, S * 1.012]} // a hair of overlap hides the hex seams
       raycast={self ? NO_RAYCAST : undefined}
       onPointerMove={(e) => {
@@ -144,13 +156,24 @@ function Skirt({ worldId, R, P }: { worldId: string; R: number; P: number }) {
 
 function SkirtFace({ tile, P, base }: { tile: SkirtTile; P: number; base: THREE.MeshBasicMaterial }) {
   const tex = usePixelTexture(tile.asset_id);
-  const geo = useMemo(() => tileFaceGeometry(tile.q, tile.r, P), [tile.q, tile.r, P]);
+  const levels = useLevels(tile.height_id);
+  const geo = useMemo(
+    () =>
+      levels && tile.height_id && levels.C === P + 3
+        ? reliefGeometry(tile.q, tile.r, tile.height_id, levels)
+        : tileFaceGeometry(tile.q, tile.r, P),
+    [levels, tile.height_id, tile.q, tile.r, P],
+  );
+  const extruded = !!(levels && tile.height_id && levels.C === P + 3);
   const mat = useMemo(() => {
     const m = base.clone();
+    m.vertexColors = extruded;
+    m.side = extruded ? THREE.DoubleSide : THREE.FrontSide;
+    m.depthWrite = extruded; // walls must hide what stands behind them
     m.onBeforeCompile = base.onBeforeCompile;
     m.customProgramCacheKey = base.customProgramCacheKey;
     return m;
-  }, [base]);
+  }, [base, extruded]);
   useEffect(() => {
     mat.map = tex;
     mat.needsUpdate = true;
@@ -159,7 +182,14 @@ function SkirtFace({ tile, P, base }: { tile: SkirtTile; P: number; base: THREE.
   const [x, z] = hexToWorld(tile.q, tile.r);
   if (!tex) return null;
   return (
-    <mesh geometry={geo} material={mat} position={[x, TILE_HEIGHT - 0.001, z]} scale={[1.01, 1, 1.01]} raycast={NO_RAYCAST} renderOrder={5} />
+    <mesh
+      geometry={geo}
+      material={mat}
+      position={[x, extruded ? 0 : TILE_HEIGHT - 0.001, z]}
+      scale={[1.01, 1, 1.01]}
+      raycast={NO_RAYCAST}
+      renderOrder={5}
+    />
   );
 }
 
@@ -214,7 +244,7 @@ const NOISE_GLSL = `
  * finer than a screen pixel (chosen from the texel footprint, like a mip level), so zooming out
  * doesn't shimmer.
  */
-function makeFogMaterial(R: number, S: number, P: number): THREE.MeshBasicMaterial {
+function makeFogMaterial(R: number, S: number, P: number, relief = false): THREE.MeshBasicMaterial {
   const inner = Math.sqrt(3) * R + 1.2; // the region's rim
   const uniforms: FogUniforms = {
     uRim: { value: inner - 0.6 },
@@ -225,7 +255,13 @@ function makeFogMaterial(R: number, S: number, P: number): THREE.MeshBasicMateri
     uFog: { value: FOG },
     uHover: { value: 0 },
   };
-  const m = new THREE.MeshBasicMaterial({ transparent: false, fog: false }); // its own fog, not the camera's
+  // its own fog, not the camera's; extruded tiles shade their walls with vertex colours
+  const m = new THREE.MeshBasicMaterial({
+    transparent: false,
+    fog: false,
+    vertexColors: relief,
+    side: relief ? THREE.DoubleSide : THREE.FrontSide,
+  });
   m.userData.uniforms = uniforms;
   m.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms);
@@ -268,7 +304,7 @@ function makeFogMaterial(R: number, S: number, P: number): THREE.MeshBasicMateri
         gl_FragColor.rgb = mix(muted, uFog, clamp(band, 0.0, 0.94));`,
       );
   };
-  m.customProgramCacheKey = () => "hexworld-context-fog-3";
+  m.customProgramCacheKey = () => `hexworld-context-fog-4${relief ? "-relief" : ""}`;
   return m;
 }
 

@@ -981,6 +981,7 @@ export interface SkirtTile {
   ring: number;
   biome: string;
   asset_id: string;
+  height_id: string | null;
 }
 /**
  * This interface was referenced by `ApiSchemas`'s JSON-Schema

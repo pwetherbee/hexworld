@@ -1486,6 +1486,17 @@
         },
         "asset_id": {
           "type": "string"
+        },
+        "height_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1493,7 +1504,8 @@
         "r",
         "ring",
         "biome",
-        "asset_id"
+        "asset_id",
+        "height_id"
       ],
       "title": "SkirtTile",
       "type": "object"

@@ -445,3 +445,61 @@ export function makeReliefMaterial(): { material: THREE.MeshBasicMaterial; unifo
   material.customProgramCacheKey = () => "hexworld-relief-v3";
   return { material, uniforms };
 }
+
+// A drilled layer is its parent tile zoomed in: a floor there rises `zoom` levels (backend
+// orchestrator/run.py LENS_LEVELS) and landforms a quarter of that (art/procedural.py
+// LENS_ELEVATION). The parent's tiles drawn around a region are zoomed the same way, so their hills
+// and buildings stand at the same scale as the region's own. Keep these in step with the backend.
+export const LENS_LEVELS = 1.0;
+export const LENS_ELEVATION = 0.25;
+
+/** A parent tile's levels as seen from inside a region zoomed `factor` times: ground rebased like
+ * the region's own (level 1 stays 1, relief grows by the landform share), buildings standing on it
+ * at full zoom (a floor = `factor` levels, windows scaled to match). */
+export function zoomLevels(lv: Levels, factor: number): Levels {
+  const { C } = lv;
+  const n = C * C;
+  const ground = new Float32Array(n);
+  let known = new Uint8Array(n);
+  for (let k = 0; k < n; k++) {
+    if (lv.code[k] === 0) {
+      ground[k] = lv.data[k];
+      known[k] = 1;
+    }
+  }
+  // the ground under each building: spread in from the pixels around its footprint
+  for (let pass = 0; pass < 64; pass++) {
+    const next = known.slice();
+    let changed = false;
+    for (let j = 0; j < C; j++) {
+      for (let i = 0; i < C; i++) {
+        const k = j * C + i;
+        if (known[k]) continue;
+        let best = Infinity;
+        if (i > 0 && known[k - 1]) best = Math.min(best, ground[k - 1]);
+        if (i < C - 1 && known[k + 1]) best = Math.min(best, ground[k + 1]);
+        if (j > 0 && known[k - C]) best = Math.min(best, ground[k - C]);
+        if (j < C - 1 && known[k + C]) best = Math.min(best, ground[k + C]);
+        if (best < Infinity) {
+          ground[k] = best;
+          next[k] = 1;
+          changed = true;
+        }
+      }
+    }
+    known = next;
+    if (!changed) break;
+  }
+  const kb = factor * LENS_LEVELS;
+  const kt = kb * LENS_ELEVATION;
+  const data = new Uint8Array(n);
+  const floor = new Uint8Array(n);
+  for (let k = 0; k < n; k++) {
+    const g = known[k] ? ground[k] : lv.data[k];
+    const base = Math.max(0, 1 + (g - 1) * kt);
+    const up = lv.code[k] ? Math.max(0, lv.data[k] - g) * kb : 0;
+    data[k] = Math.min(255, Math.round(base + up));
+    floor[k] = lv.code[k] ? Math.min(63, Math.round(kb * Math.max(1, lv.floor?.[k] ?? 1))) : 0;
+  }
+  return { C, data, liquid: lv.liquid, code: lv.code, floor };
+}
