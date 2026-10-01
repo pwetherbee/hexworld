@@ -74,7 +74,7 @@ class Runtime:
         image: ImageBackend | None = None,
     ):
         self.settings = settings
-        self.store = store or Store(settings.data_dir)
+        self.store = store or Store(settings.data_dir, settings.sqlite_journal)
         self.bus = EventBus()
         self.store.add_listener(self.bus.publish)
         self.model_factory = model_factory or build_models(settings)

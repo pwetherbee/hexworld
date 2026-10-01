@@ -90,7 +90,7 @@ def _strip_property_titles(node):  # noqa: ANN001, ANN202
 def _runs(args: argparse.Namespace) -> None:
     from hexworld.store import Store
 
-    store = Store(get_settings().data_dir)
+    store = Store(get_settings().data_dir, get_settings().sqlite_journal)
     if args.runs_cmd == "list":
         for run in store.list_runs()[:50]:
             st = run.stats

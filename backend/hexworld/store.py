@@ -45,14 +45,21 @@ CREATE TABLE IF NOT EXISTS llm_records (
 
 
 class Store:
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, journal: str = "WAL"):
+        """`journal`: SQLite journal mode. WAL is fastest on a local disk; network filesystems (a
+        Cloud Run bucket or NFS volume) need DELETE, since WAL relies on shared memory."""
         self.data_dir = Path(data_dir)
         self.assets_dir = self.data_dir / "assets"
         self.runs_dir = self.data_dir / "runs"
         self.assets_dir.mkdir(parents=True, exist_ok=True)
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(self.data_dir / "hexworld.db", check_same_thread=False)
-        self._db.execute("PRAGMA journal_mode=WAL")
+        mode = (
+            journal.upper()
+            if journal.upper() in ("WAL", "DELETE", "TRUNCATE", "PERSIST", "MEMORY")
+            else "WAL"
+        )
+        self._db.execute(f"PRAGMA journal_mode={mode}")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(SCHEMA)
         self._lock = threading.RLock()

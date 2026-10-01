@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     )
 
     data_dir: Path = REPO_ROOT / "data"
+    # SQLite journal: WAL on a local disk; DELETE on a network filesystem (Cloud Run volume, NFS)
+    sqlite_journal: str = "WAL"
 
     # ---- LLM
     llm: Literal["openai", "fake"] = "openai"  # fake = scripted test double (pytest only)
