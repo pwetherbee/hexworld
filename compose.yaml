@@ -1,0 +1,20 @@
+# One-command local run of the production image:
+#   cp .env.example .env   # then set OPENAI_API_KEY
+#   docker compose up --build
+# Open http://localhost:8080. Worlds persist in the `hexworld-data` volume.
+services:
+  hexworld:
+    build: .
+    image: hexworld
+    ports:
+      - "8080:8080"
+    env_file: .env
+    environment:
+      HEXWORLD_DATA_DIR: /data
+      HEXWORLD_HOST: 0.0.0.0
+    volumes:
+      - hexworld-data:/data
+    restart: unless-stopped
+
+volumes:
+  hexworld-data:

@@ -1,0 +1,23 @@
+# secrets and local runtime data never enter the image
+.env
+.env.*
+!.env.example
+data/
+
+# rebuilt inside the image
+**/node_modules
+**/.venv
+frontend/dist
+**/*.tsbuildinfo
+
+# licensed third-party audio stays local (see scripts/import-sfx.mjs); the UI is silent without it
+frontend/public/sfx
+
+# not needed at runtime
+.git
+.claude
+docs
+backend/tests
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache

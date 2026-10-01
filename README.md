@@ -10,27 +10,169 @@ routes feedback to whichever agent owns the problem.
 
 The project is a testbed for multi-agent coordination that is **robust, observable and efficient**.
 
-## Quick start
+## Run it
+
+You need an **OpenAI API key**. That's the only secret. Pick one way to run:
+
+| | what you need | command | open |
+|---|---|---|---|
+| **A. Docker** (easiest) | Docker | `docker compose up --build` | http://localhost:8080 |
+| **B. Local dev** (hot reload) | Python 3.13 + [uv](https://docs.astral.sh/uv/), Node 22 + pnpm 10 | two terminals, below | http://localhost:5173 |
+| **C. Google Cloud Run** | a GCP project + `gcloud` | `gcloud run deploy`, below | the service URL |
+
+### A. Docker
 
 ```bash
-cd backend && uv sync && cd ../frontend && pnpm install
-node scripts/import-sfx.mjs          # optional: local UI sounds (licensed, gitignored)
+git clone https://github.com/pwetherbee/hexworld.git
+cd hexworld
+cp .env.example .env
 ```
 
-Put your OpenAI key in `.env` at the repo root (`OPENAI_API_KEY=...`; see `.env.example`), then:
+Edit `.env` and set `OPENAI_API_KEY=sk-...`. Then:
 
 ```bash
-uv run --project backend hexworld serve      # API on :8000
+docker compose up --build
 ```
+
+Open http://localhost:8080. Worlds are saved in the `hexworld-data` Docker volume, so they survive
+restarts. Stop with `Ctrl+C`. `docker compose down -v` also deletes the saved worlds.
+
+Without compose:
 
 ```bash
-pnpm --dir frontend dev                      # UI on :5173
+docker build -t hexworld .
+docker run --rm -p 8080:8080 -e OPENAI_API_KEY=sk-... -v hexworld-data:/data hexworld
 ```
 
-Open http://localhost:5173 and click a hex. Every role runs on a real model configured per role in
-`.env` (default `gpt-6-luna`). Sprites are painted by an image model (`HEXWORLD_SPRITE_IMAGE_MODEL`,
-default `gpt-image-2.5-flare`); set it empty to have the sprite artist draw with the sprite DSL
-instead. `hexworld models` lists what your key can use.
+### B. Local development
+
+```bash
+git clone https://github.com/pwetherbee/hexworld.git
+cd hexworld
+cp .env.example .env
+```
+
+Edit `.env` and set `OPENAI_API_KEY=sk-...`. Install the dependencies once:
+
+```bash
+cd backend && uv sync && cd ../frontend && pnpm install && cd ..
+```
+
+Terminal 1 (API on :8000):
+
+```bash
+uv run --project backend hexworld serve
+```
+
+Terminal 2 (UI on :5173, proxies `/api` to :8000):
+
+```bash
+pnpm --dir frontend dev
+```
+
+Open http://localhost:5173. Optional: `node scripts/import-sfx.mjs` imports the UI sounds. They are
+licensed, so they're kept out of git and Docker; without them the UI is silent.
+
+### C. Google Cloud Run
+
+The image is a single stateful service. Runs execute in the background inside the server process, and
+the UI listens on a WebSocket, so deploy it as **one instance with CPU always on**. These steps use
+`gcloud` from the repo root (Cloud Build builds the `Dockerfile` for you).
+
+1. Pick a project and region, and enable the services:
+
+   ```bash
+   gcloud config set project YOUR_PROJECT_ID
+   gcloud config set run/region us-central1
+   gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com
+   ```
+
+2. Store the OpenAI key as a secret:
+
+   ```bash
+   printf %s "sk-..." | gcloud secrets create openai-api-key --data-file=-
+   ```
+
+3. Create a bucket for the worlds (SQLite + generated images), so they survive redeploys:
+
+   ```bash
+   gcloud storage buckets create gs://YOUR_PROJECT_ID-hexworld-data --location=us-central1
+   ```
+
+4. Grant the service's identity access to both. Cloud Run uses the Compute Engine default service
+   account unless you choose another:
+
+   ```bash
+   SA="$(gcloud projects describe YOUR_PROJECT_ID --format='value(projectNumber)')-compute@developer.gserviceaccount.com"
+   gcloud secrets add-iam-policy-binding openai-api-key --member="serviceAccount:$SA" --role=roles/secretmanager.secretAccessor
+   gcloud storage buckets add-iam-policy-binding gs://YOUR_PROJECT_ID-hexworld-data --member="serviceAccount:$SA" --role=roles/storage.objectAdmin
+   ```
+
+5. Deploy:
+
+   ```bash
+   gcloud run deploy hexworld --source . \
+     --allow-unauthenticated --execution-environment gen2 \
+     --min-instances 1 --max-instances 1 --no-cpu-throttling \
+     --cpu 2 --memory 2Gi --timeout 3600 --session-affinity \
+     --set-secrets OPENAI_API_KEY=openai-api-key:latest \
+     --set-env-vars HEXWORLD_DATA_DIR=/data,HEXWORLD_SQLITE_JOURNAL=DELETE \
+     --add-volume name=data,type=cloud-storage,bucket=YOUR_PROJECT_ID-hexworld-data \
+     --add-volume-mount volume=data,mount-path=/data
+   ```
+
+   `gcloud` prints the service URL when it's done. To deploy a new version, run step 5 again.
+
+Why those flags:
+
+- **`--max-instances 1`**: state lives in one process (SQLite + in-memory run schedulers).
+- **`--no-cpu-throttling`** and **`--min-instances 1`**: builds keep running between requests and
+  aren't cut off by scale-to-zero.
+- **`--timeout 3600`** and **`--session-affinity`**: keep the live event WebSocket open.
+- **`HEXWORLD_SQLITE_JOURNAL=DELETE`**: a bucket mount can't do SQLite's default WAL mode.
+
+For heavier use, or if SQLite reports locking errors on the bucket, mount a Filestore (NFS)
+volume at `/data` instead.
+
+Want to try it without persistence? Drop the two `--add-volume*` flags and the env vars. Worlds then
+live in the container and vanish on redeploy.
+
+`--allow-unauthenticated` makes the URL public, and anyone with it can spend your OpenAI credits.
+To keep it private, leave that flag out and put Cloud Run's IAM or IAP in front of it.
+
+### Configuration
+
+All settings are environment variables (or lines in `.env`). The full list, with defaults, is in
+`backend/hexworld/config.py`.
+
+| variable | default | what it does |
+|---|---|---|
+| `OPENAI_API_KEY` | (required) | key for every agent and the image model |
+| `HEXWORLD_SUPER_MODEL` / `_TILE_MODEL` / `_ARTIST_MODEL` | `gpt-6-luna` | model per agent role |
+| `HEXWORLD_SPRITE_IMAGE_MODEL` | `gpt-image-2.5-flare` | paints sprites and scenes; `""` = draw sprites with the built-in DSL |
+| `HEXWORLD_DATA_DIR` | `./data` (`/data` in Docker) | SQLite database + generated PNGs |
+| `HEXWORLD_SQLITE_JOURNAL` | `WAL` | `DELETE` on network filesystems (Cloud Run bucket, NFS) |
+| `HEXWORLD_HOST` / `HEXWORLD_PORT` | `127.0.0.1` / `8000` | where the local server listens (the container listens on `0.0.0.0:$PORT`, default 8080) |
+
+`uv run --project backend hexworld models` lists the models your key can use.
+
+### For AI agents working on this repo
+
+- Read `CLAUDE.md` first: architecture rules and conventions.
+- The backend tests run offline (a scripted fake LLM), so no key is needed:
+  `cd backend && uv run pytest`.
+- Frontend: `cd frontend && pnpm test && pnpm build`.
+- After changing API models (pydantic) run `pnpm --dir frontend gen:types`.
+- Never commit `.env`, `data/` or `frontend/public/sfx/`.
+
+## Using it
+
+Click an empty hex and describe a world ("a misty fishing village on a cliff", "New York", "a
+dwarven mine"). Agents plan it and build it tile by tile, live. The **game pill** at the top middle
+switches to **play mode**:
+- Walk the overworld as a traveller.
+- **Enter** a tile to open its region: the tile seen up close, built from the parent tile's own map.
+- **Look** at any tile for a painted pixel-art scene.
 
 ## Agents (Google ADK)
 

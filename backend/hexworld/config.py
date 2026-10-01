@@ -27,8 +27,8 @@ class Settings(BaseSettings):
     llm: Literal["openai", "fake"] = "openai"  # fake = scripted test double (pytest only)
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     openai_base_url: str | None = Field(default=None, validation_alias="OPENAI_BASE_URL")
-    super_model: str = "gpt-5"
-    tile_model: str = "gpt-5-mini"
+    super_model: str = "gpt-6-luna"
+    tile_model: str = "gpt-6-luna"
     # Optional reasoning effort per role ("minimal"/"low"/"medium"/"high"); empty = model default.
     super_reasoning: str = "low"
     tile_reasoning: str = "minimal"
